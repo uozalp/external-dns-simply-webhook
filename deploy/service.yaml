@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: external-dns-simply-webhook
+  namespace: external-dns
+  labels:
+    app: external-dns-simply-webhook
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: http
+    protocol: TCP
+    name: http
+  selector:
+    app: external-dns-simply-webhook
