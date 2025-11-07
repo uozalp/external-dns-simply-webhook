@@ -84,7 +84,15 @@ func (h *Handler) GetRecords(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", MediaTypeVersion)
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+
+	// Marshal to JSON first to avoid chunked encoding
+	jsonData, err := json.Marshal(response)
+	if err != nil {
+		h.Logger.Errorf("Failed to marshal response: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.Write(jsonData)
 }
 
 // ApplyChanges applies the desired DNS record changes
@@ -180,7 +188,15 @@ func (h *Handler) AdjustEndpoints(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", MediaTypeVersion)
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(endpoints)
+
+	// Marshal to JSON first to avoid chunked encoding
+	jsonData, err := json.Marshal(endpoints)
+	if err != nil {
+		h.Logger.Errorf("Failed to marshal response: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.Write(jsonData)
 }
 
 // Healthz returns health status
