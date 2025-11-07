@@ -7,13 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"strings"
 	"time"
 )
 
 const (
-	BaseURL        = "https://api.simply.com"
+	BaseURL        = "https://api.simply.com/2/"
 	DefaultTimeout = 30 * time.Second
 )
 
@@ -47,45 +45,32 @@ type Record struct {
 	Domain string `json:"domain,omitempty"`
 }
 
-// Domain represents a domain in Simply.com
-type Domain struct {
-	Name string `json:"name"`
-}
-
-// ListDomainsResponse represents the response from listing domains
-type ListDomainsResponse struct {
-	Domains []Domain `json:"domains"`
-}
-
-// ListRecordsResponse represents the response from listing records
-type ListRecordsResponse struct {
-	Records []Record `json:"records"`
-}
-
-// doRequest performs an HTTP request with Basic Authentication
-func (c *Client) doRequest(method, path string, body interface{}) ([]byte, error) {
+// makeRequest performs an HTTP request with authentication
+func (c *Client) makeRequest(method, endpoint string, body interface{}) ([]byte, error) {
 	var reqBody io.Reader
 	if body != nil {
-		jsonData, err := json.Marshal(body)
+		jsonBody, err := json.Marshal(body)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal request body: %w", err)
 		}
-		reqBody = bytes.NewBuffer(jsonData)
+		reqBody = bytes.NewBuffer(jsonBody)
 	}
 
-	req, err := http.NewRequest(method, c.BaseURL+path, reqBody)
+	url := c.BaseURL + endpoint
+	req, err := http.NewRequest(method, url, reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Set Basic Authentication
+	// Add Basic Authentication
 	auth := base64.StdEncoding.EncodeToString([]byte(c.AccountName + ":" + c.APIKey))
 	req.Header.Set("Authorization", "Basic "+auth)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute request: %w", err)
+		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -101,106 +86,92 @@ func (c *Client) doRequest(method, path string, body interface{}) ([]byte, error
 	return respBody, nil
 }
 
-// ListDomains retrieves all domains from Simply.com
-func (c *Client) ListDomains() ([]Domain, error) {
-	respBody, err := c.doRequest("GET", "/2/domains", nil)
-	if err != nil {
-		return nil, err
-	}
-
-	var response ListDomainsResponse
-	if err := json.Unmarshal(respBody, &response); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-
-	return response.Domains, nil
-}
-
-// ListRecords retrieves all DNS records for a specific domain
+// ListRecords returns all DNS records for a domain
 func (c *Client) ListRecords(domain string) ([]Record, error) {
-	path := fmt.Sprintf("/2/records?domain=%s", url.QueryEscape(domain))
-	respBody, err := c.doRequest("GET", path, nil)
+	endpoint := fmt.Sprintf("my/products/%s/dns/records", domain)
+
+	respBody, err := c.makeRequest("GET", endpoint, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to list records for domain %s: %w", domain, err)
 	}
 
-	var response ListRecordsResponse
+	var response struct {
+		Status  int    `json:"status"`
+		Message string `json:"message"`
+		Records []struct {
+			RecordID int    `json:"record_id"`
+			Name     string `json:"name"`
+			TTL      int    `json:"ttl"`
+			Data     string `json:"data"`
+			Type     string `json:"type"`
+		} `json:"records"`
+	}
+
 	if err := json.Unmarshal(respBody, &response); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	// Populate domain field in records
-	for i := range response.Records {
-		response.Records[i].Domain = domain
+	var records []Record
+	for _, r := range response.Records {
+		records = append(records, Record{
+			ID:     r.RecordID,
+			Type:   r.Type,
+			Host:   r.Name,
+			Data:   r.Data,
+			TTL:    r.TTL,
+			Domain: domain,
+		})
 	}
 
-	return response.Records, nil
+	return records, nil
 }
 
-// ListAllRecords retrieves all DNS records across all domains
-func (c *Client) ListAllRecords() ([]Record, error) {
-	domains, err := c.ListDomains()
-	if err != nil {
-		return nil, fmt.Errorf("failed to list domains: %w", err)
-	}
-
-	var allRecords []Record
-	for _, domain := range domains {
-		records, err := c.ListRecords(domain.Name)
-		if err != nil {
-			return nil, fmt.Errorf("failed to list records for domain %s: %w", domain.Name, err)
-		}
-		allRecords = append(allRecords, records...)
-	}
-
-	return allRecords, nil
-}
-
-// AddRecord creates a new DNS record
+// AddRecord adds a new DNS record
 func (c *Client) AddRecord(record Record) error {
-	_, err := c.doRequest("POST", "/2/record_add", record)
-	return err
+	endpoint := fmt.Sprintf("my/products/%s/dns/records", record.Domain)
+
+	payload := map[string]interface{}{
+		"type": record.Type,
+		"name": record.Host,
+		"data": record.Data,
+		"ttl":  record.TTL,
+	}
+
+	_, err := c.makeRequest("POST", endpoint, payload)
+	if err != nil {
+		return fmt.Errorf("failed to add record %s %s to domain %s: %w", record.Type, record.Host, record.Domain, err)
+	}
+
+	return nil
 }
 
 // UpdateRecord updates an existing DNS record
 func (c *Client) UpdateRecord(record Record) error {
-	_, err := c.doRequest("POST", "/2/record_update", record)
-	return err
-}
+	endpoint := fmt.Sprintf("my/products/%s/dns/records/%d", record.Domain, record.ID)
 
-// DeleteRecord deletes a DNS record by ID
-func (c *Client) DeleteRecord(recordID int, domain string) error {
 	payload := map[string]interface{}{
-		"id":     recordID,
-		"domain": domain,
+		"type": record.Type,
+		"name": record.Host,
+		"data": record.Data,
+		"ttl":  record.TTL,
 	}
-	_, err := c.doRequest("POST", "/2/record_delete", payload)
-	return err
+
+	_, err := c.makeRequest("PUT", endpoint, payload)
+	if err != nil {
+		return fmt.Errorf("failed to update record %d in domain %s: %w", record.ID, record.Domain, err)
+	}
+
+	return nil
 }
 
-// ParseFQDN splits a fully qualified domain name into host and domain parts
-// e.g., "www.example.com" -> host="www", domain="example.com"
-// e.g., "example.com" -> host="@", domain="example.com"
-func ParseFQDN(fqdn string, domains []string) (host, domain string) {
-	fqdn = strings.TrimSuffix(fqdn, ".")
+// DeleteRecord deletes a DNS record
+func (c *Client) DeleteRecord(recordID int, domain string) error {
+	endpoint := fmt.Sprintf("my/products/%s/dns/records/%d", domain, recordID)
 
-	// Find the longest matching domain
-	var matchedDomain string
-	for _, d := range domains {
-		if strings.HasSuffix(fqdn, d) && len(d) > len(matchedDomain) {
-			matchedDomain = d
-		}
+	_, err := c.makeRequest("DELETE", endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("failed to delete record %d from domain %s: %w", recordID, domain, err)
 	}
 
-	if matchedDomain == "" {
-		// No matching domain found, treat entire FQDN as host
-		return fqdn, ""
-	}
-
-	if fqdn == matchedDomain {
-		return "@", matchedDomain
-	}
-
-	host = strings.TrimSuffix(fqdn, "."+matchedDomain)
-	return host, matchedDomain
+	return nil
 }

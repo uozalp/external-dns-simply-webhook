@@ -42,7 +42,7 @@ spec:
         - name: LOG_LEVEL
           value: "info"
         - name: DOMAIN_FILTER
-          value: "k8s.ozalp.dk"  # Optional: comma-separated list of domains to manage
+          value: "k8s.ozalp.dk"  # Add your actual domain here
         livenessProbe:
           httpGet:
             path: /healthz

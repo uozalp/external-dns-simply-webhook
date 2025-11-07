@@ -59,7 +59,7 @@ func main() {
 	}
 
 	// Create webhook handler
-	handler := webhook.NewHandler(client, domainFilterList, logger)
+	handler := webhook.NewHandler(client, logger, domainFilterList)
 
 	// Setup router
 	router := mux.NewRouter()

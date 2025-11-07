@@ -3,6 +3,7 @@ package webhook
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -17,18 +18,17 @@ const (
 
 // Handler handles webhook requests from ExternalDNS
 type Handler struct {
-	Client         *simply.Client
-	DomainFilter   []string
-	Logger         *logrus.Logger
-	managedDomains []string
+	Client       *simply.Client
+	Logger       *logrus.Logger
+	DomainFilter []string
 }
 
 // NewHandler creates a new webhook handler
-func NewHandler(client *simply.Client, domainFilter []string, logger *logrus.Logger) *Handler {
+func NewHandler(client *simply.Client, logger *logrus.Logger, domainFilter []string) *Handler {
 	return &Handler{
 		Client:       client,
-		DomainFilter: domainFilter,
 		Logger:       logger,
+		DomainFilter: domainFilter,
 	}
 }
 
@@ -36,38 +36,67 @@ func NewHandler(client *simply.Client, domainFilter []string, logger *logrus.Log
 func (h *Handler) GetRecords(w http.ResponseWriter, r *http.Request) {
 	h.Logger.Info("GET /records called")
 
-	// Fetch all records from Simply.com
-	h.Logger.Debug("Fetching records from Simply.com API")
-	records, err := h.Client.ListAllRecords()
-	if err != nil {
-		h.Logger.Errorf("Failed to list records: %v", err)
-		http.Error(w, fmt.Sprintf("Failed to list records: %v", err), http.StatusInternalServerError)
-		return
+	var allEndpoints []*endpoint.Endpoint
+
+	// Get records for each configured domain
+	for _, domain := range h.DomainFilter {
+		h.Logger.Infof("Fetching records for domain: %s", domain)
+
+		records, err := h.Client.ListRecords(domain)
+		if err != nil {
+			h.Logger.Errorf("Failed to list records for domain %s: %v", domain, err)
+			continue
+		}
+
+		h.Logger.Infof("Found %d records for domain %s", len(records), domain)
+
+		// Convert Simply records to External-DNS endpoints
+		for _, record := range records {
+			h.Logger.Debugf("Processing record: ID=%d, Type=%s, Host=%s, Data=%s",
+				record.ID, record.Type, record.Host, record.Data)
+
+			// Build full DNS name
+			var dnsName string
+			if record.Host == "@" || record.Host == "" {
+				dnsName = domain
+			} else {
+				dnsName = record.Host + "." + domain
+			}
+
+			ep := &endpoint.Endpoint{
+				DNSName:    dnsName,
+				RecordType: record.Type,
+				Targets:    []string{record.Data},
+				RecordTTL:  endpoint.TTL(record.TTL),
+			}
+			allEndpoints = append(allEndpoints, ep)
+		}
 	}
 
-	h.Logger.Debugf("Retrieved %d records from Simply.com", len(records))
-
-	// Convert to ExternalDNS endpoints
-	endpoints := h.simplyToEndpoints(records)
-
-	// Apply domain filter
-	if len(h.DomainFilter) > 0 {
-		endpoints = h.filterEndpoints(endpoints)
-	}
-
-	h.Logger.Infof("Returning %d records", len(endpoints))
+	h.Logger.Infof("Returning %d records across %d domains", len(allEndpoints), len(h.DomainFilter))
 
 	w.Header().Set("Content-Type", MediaTypeVersion)
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(endpoints)
+	json.NewEncoder(w).Encode(allEndpoints)
 }
 
 // ApplyChanges applies the desired DNS record changes
 func (h *Handler) ApplyChanges(w http.ResponseWriter, r *http.Request) {
 	h.Logger.Info("POST /records called")
 
+	// Read the raw body first for logging
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		h.Logger.Errorf("Failed to read request body: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to read request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Log the raw payload
+	h.Logger.Infof("Raw payload from ExternalDNS: %s", string(bodyBytes))
+
 	var changes Changes
-	if err := json.NewDecoder(r.Body).Decode(&changes); err != nil {
+	if err := json.Unmarshal(bodyBytes, &changes); err != nil {
 		h.Logger.Errorf("Failed to decode request body: %v", err)
 		http.Error(w, fmt.Sprintf("Failed to decode request: %v", err), http.StatusBadRequest)
 		return
@@ -76,12 +105,16 @@ func (h *Handler) ApplyChanges(w http.ResponseWriter, r *http.Request) {
 	h.Logger.Infof("Received %d desired records, %d current records",
 		len(changes.DesiredRecords), len(changes.CurrentRecords))
 
-	// Get available domains for FQDN parsing
-	domains, err := h.getDomains()
-	if err != nil {
-		h.Logger.Errorf("Failed to get domains: %v", err)
-		http.Error(w, fmt.Sprintf("Failed to get domains: %v", err), http.StatusInternalServerError)
-		return
+	// Log each desired record in detail
+	for i, record := range changes.DesiredRecords {
+		h.Logger.Infof("Desired record %d: DNSName=%s, Type=%s, Targets=%v, TTL=%d",
+			i+1, record.DNSName, record.RecordType, record.Targets, record.RecordTTL)
+	}
+
+	// Log each current record in detail
+	for i, record := range changes.CurrentRecords {
+		h.Logger.Infof("Current record %d: DNSName=%s, Type=%s, Targets=%v, TTL=%d",
+			i+1, record.DNSName, record.RecordType, record.Targets, record.RecordTTL)
 	}
 
 	// Calculate the changes needed
@@ -92,7 +125,7 @@ func (h *Handler) ApplyChanges(w http.ResponseWriter, r *http.Request) {
 
 	// Apply deletions first
 	for _, ep := range deletes {
-		if err := h.deleteEndpoint(ep, domains); err != nil {
+		if err := h.deleteEndpoint(ep); err != nil {
 			h.Logger.Errorf("Failed to delete endpoint %s: %v", ep.DNSName, err)
 			http.Error(w, fmt.Sprintf("Failed to delete record: %v", err), http.StatusInternalServerError)
 			return
@@ -101,7 +134,7 @@ func (h *Handler) ApplyChanges(w http.ResponseWriter, r *http.Request) {
 
 	// Apply updates
 	for _, ep := range updates {
-		if err := h.updateEndpoint(ep, domains); err != nil {
+		if err := h.updateEndpoint(ep); err != nil {
 			h.Logger.Errorf("Failed to update endpoint %s: %v", ep.DNSName, err)
 			http.Error(w, fmt.Sprintf("Failed to update record: %v", err), http.StatusInternalServerError)
 			return
@@ -110,7 +143,7 @@ func (h *Handler) ApplyChanges(w http.ResponseWriter, r *http.Request) {
 
 	// Apply creates
 	for _, ep := range creates {
-		if err := h.createEndpoint(ep, domains); err != nil {
+		if err := h.createEndpoint(ep); err != nil {
 			h.Logger.Errorf("Failed to create endpoint %s: %v", ep.DNSName, err)
 			http.Error(w, fmt.Sprintf("Failed to create record: %v", err), http.StatusInternalServerError)
 			return
@@ -153,55 +186,6 @@ func (h *Handler) Healthz(w http.ResponseWriter, r *http.Request) {
 type Changes struct {
 	DesiredRecords []*endpoint.Endpoint `json:"desiredRecords"`
 	CurrentRecords []*endpoint.Endpoint `json:"currentRecords"`
-}
-
-// simplyToEndpoints converts Simply.com records to ExternalDNS endpoints
-func (h *Handler) simplyToEndpoints(records []simply.Record) []*endpoint.Endpoint {
-	var endpoints []*endpoint.Endpoint
-
-	for _, record := range records {
-		// Construct FQDN
-		var fqdn string
-		if record.Host == "@" || record.Host == "" {
-			fqdn = record.Domain
-		} else {
-			fqdn = fmt.Sprintf("%s.%s", record.Host, record.Domain)
-		}
-
-		ep := &endpoint.Endpoint{
-			DNSName:    fqdn,
-			RecordType: record.Type,
-			Targets:    []string{record.Data},
-			RecordTTL:  endpoint.TTL(record.TTL),
-		}
-
-		// Store Simply.com record ID for updates/deletes
-		if ep.ProviderSpecific == nil {
-			ep.ProviderSpecific = make(endpoint.ProviderSpecific, 0)
-		}
-		ep.ProviderSpecific = append(ep.ProviderSpecific, endpoint.ProviderSpecificProperty{
-			Name:  "simply-record-id",
-			Value: fmt.Sprintf("%d", record.ID),
-		})
-
-		endpoints = append(endpoints, ep)
-	}
-
-	return endpoints
-}
-
-// filterEndpoints filters endpoints based on domain filter
-func (h *Handler) filterEndpoints(endpoints []*endpoint.Endpoint) []*endpoint.Endpoint {
-	var filtered []*endpoint.Endpoint
-	for _, ep := range endpoints {
-		for _, domain := range h.DomainFilter {
-			if strings.HasSuffix(ep.DNSName, domain) {
-				filtered = append(filtered, ep)
-				break
-			}
-		}
-	}
-	return filtered
 }
 
 // calculateChanges determines which endpoints need to be created, updated, or deleted
@@ -265,30 +249,18 @@ func endpointsEqual(a, b *endpoint.Endpoint) bool {
 	return a.RecordTTL == b.RecordTTL
 }
 
-// getDomains returns the list of managed domains
-func (h *Handler) getDomains() ([]string, error) {
-	if len(h.managedDomains) > 0 {
-		return h.managedDomains, nil
-	}
-
-	domains, err := h.Client.ListDomains()
-	if err != nil {
-		return nil, err
-	}
-
-	h.managedDomains = make([]string, len(domains))
-	for i, d := range domains {
-		h.managedDomains[i] = d.Name
-	}
-
-	return h.managedDomains, nil
-}
-
 // createEndpoint creates a new DNS record
-func (h *Handler) createEndpoint(ep *endpoint.Endpoint, domains []string) error {
-	host, domain := simply.ParseFQDN(ep.DNSName, domains)
-	if domain == "" {
-		return fmt.Errorf("could not determine domain for %s", ep.DNSName)
+func (h *Handler) createEndpoint(ep *endpoint.Endpoint) error {
+	// Extract domain from DNS name (simple approach - last two parts)
+	parts := strings.Split(ep.DNSName, ".")
+	if len(parts) < 2 {
+		return fmt.Errorf("invalid DNS name: %s", ep.DNSName)
+	}
+
+	domain := strings.Join(parts[len(parts)-2:], ".")
+	host := strings.Join(parts[:len(parts)-2], ".")
+	if host == "" {
+		host = "@"
 	}
 
 	for _, target := range ep.Targets {
@@ -310,10 +282,17 @@ func (h *Handler) createEndpoint(ep *endpoint.Endpoint, domains []string) error 
 }
 
 // updateEndpoint updates an existing DNS record
-func (h *Handler) updateEndpoint(ep *endpoint.Endpoint, domains []string) error {
-	host, domain := simply.ParseFQDN(ep.DNSName, domains)
-	if domain == "" {
-		return fmt.Errorf("could not determine domain for %s", ep.DNSName)
+func (h *Handler) updateEndpoint(ep *endpoint.Endpoint) error {
+	// Extract domain from DNS name
+	parts := strings.Split(ep.DNSName, ".")
+	if len(parts) < 2 {
+		return fmt.Errorf("invalid DNS name: %s", ep.DNSName)
+	}
+
+	domain := strings.Join(parts[len(parts)-2:], ".")
+	host := strings.Join(parts[:len(parts)-2], ".")
+	if host == "" {
+		host = "@"
 	}
 
 	// Get the record ID from provider specific properties
@@ -330,7 +309,6 @@ func (h *Handler) updateEndpoint(ep *endpoint.Endpoint, domains []string) error 
 	}
 
 	// For simplicity, we'll use the first target
-	// In a more sophisticated implementation, you might handle multiple targets differently
 	if len(ep.Targets) == 0 {
 		return fmt.Errorf("no targets specified for %s", ep.DNSName)
 	}
@@ -353,11 +331,14 @@ func (h *Handler) updateEndpoint(ep *endpoint.Endpoint, domains []string) error 
 }
 
 // deleteEndpoint deletes a DNS record
-func (h *Handler) deleteEndpoint(ep *endpoint.Endpoint, domains []string) error {
-	_, domain := simply.ParseFQDN(ep.DNSName, domains)
-	if domain == "" {
-		return fmt.Errorf("could not determine domain for %s", ep.DNSName)
+func (h *Handler) deleteEndpoint(ep *endpoint.Endpoint) error {
+	// Extract domain from DNS name
+	parts := strings.Split(ep.DNSName, ".")
+	if len(parts) < 2 {
+		return fmt.Errorf("invalid DNS name: %s", ep.DNSName)
 	}
+
+	domain := strings.Join(parts[len(parts)-2:], ".")
 
 	// Get the record ID from provider specific properties
 	recordID := 0
