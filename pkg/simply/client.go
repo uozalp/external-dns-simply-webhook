@@ -2,6 +2,7 @@ package simply
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,16 +19,18 @@ const (
 
 // Client is a Simply.com API client
 type Client struct {
-	APIKey     string
-	BaseURL    string
-	HTTPClient *http.Client
+	AccountName string
+	APIKey      string
+	BaseURL     string
+	HTTPClient  *http.Client
 }
 
 // NewClient creates a new Simply.com API client
-func NewClient(apiKey string) *Client {
+func NewClient(accountName, apiKey string) *Client {
 	return &Client{
-		APIKey:  apiKey,
-		BaseURL: BaseURL,
+		AccountName: accountName,
+		APIKey:      apiKey,
+		BaseURL:     BaseURL,
 		HTTPClient: &http.Client{
 			Timeout: DefaultTimeout,
 		},
@@ -59,7 +62,7 @@ type ListRecordsResponse struct {
 	Records []Record `json:"records"`
 }
 
-// doRequest performs an HTTP request with API key authentication
+// doRequest performs an HTTP request with Basic Authentication
 func (c *Client) doRequest(method, path string, body interface{}) ([]byte, error) {
 	var reqBody io.Reader
 	if body != nil {
@@ -75,7 +78,9 @@ func (c *Client) doRequest(method, path string, body interface{}) ([]byte, error
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("X-API-KEY", c.APIKey)
+	// Set Basic Authentication
+	auth := base64.StdEncoding.EncodeToString([]byte(c.AccountName + ":" + c.APIKey))
+	req.Header.Set("Authorization", "Basic "+auth)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.HTTPClient.Do(req)

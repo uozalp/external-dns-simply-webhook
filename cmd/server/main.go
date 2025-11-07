@@ -30,10 +30,18 @@ func main() {
 	logger.SetLevel(level)
 
 	// Get configuration from environment
+	accountName := os.Getenv("SIMPLY_ACCOUNT_NAME")
+	if accountName == "" {
+		logger.Fatal("SIMPLY_ACCOUNT_NAME environment variable is required")
+	}
+
 	apiKey := os.Getenv("SIMPLY_API_KEY")
 	if apiKey == "" {
 		logger.Fatal("SIMPLY_API_KEY environment variable is required")
 	}
+
+	// Create Simply.com client
+	client := simply.NewClient(accountName, apiKey)
 
 	domainFilter := os.Getenv("DOMAIN_FILTER")
 	var domainFilterList []string
@@ -49,9 +57,6 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-
-	// Create Simply.com client
-	client := simply.NewClient(apiKey)
 
 	// Create webhook handler
 	handler := webhook.NewHandler(client, domainFilterList, logger)

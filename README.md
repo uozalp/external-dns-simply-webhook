@@ -27,12 +27,11 @@ This webhook adapter allows ExternalDNS to manage DNS records in Simply.com via 
 
 ## Installation
 
-### 1. Get Simply.com API Key
+### 1. Get Simply.com Credentials
 
 1. Log in to your Simply.com account
 2. Navigate to API settings
-3. Generate a new API key
-4. Save the key securely
+3. Get your account name and API key
 
 ### 2. Deploy the Webhook
 
@@ -46,9 +45,10 @@ cd external-dns-simply-webhook
 # Create namespace
 kubectl create namespace external-dns
 
-# Create secret with your Simply.com API key
-kubectl create secret generic simply-api-key \
-  --from-literal=api-key='YOUR_SIMPLY_API_KEY' \
+# Create secret with your Simply.com credentials
+kubectl create secret generic simply-credentials \
+  --from-literal=account-name='YOUR_ACCOUNT_NAME' \
+  --from-literal=api-key='YOUR_API_KEY' \
   -n external-dns
 
 # Deploy the webhook
@@ -66,7 +66,8 @@ kubectl apply -f deploy/external-dns.yaml
 ```bash
 helm repo add external-dns-simply https://uozalp.github.io/external-dns-simply-webhook
 helm install external-dns-simply external-dns-simply/external-dns-simply-webhook \
-  --set simply.apiKey='YOUR_SIMPLY_API_KEY' \
+  --set simply.accountName='YOUR_ACCOUNT_NAME' \
+  --set simply.apiKey='YOUR_API_KEY' \
   --set domainFilter='example.com'
 ```
 
@@ -76,6 +77,7 @@ The webhook is configured via environment variables in the deployment:
 
 | Variable | Description | Required | Default |
 |----------|-------------|----------|---------|
+| `SIMPLY_ACCOUNT_NAME` | Simply.com account name | Yes | - |
 | `SIMPLY_API_KEY` | Simply.com API key | Yes | - |
 | `DOMAIN_FILTER` | Comma-separated list of domains to manage | No | All domains |
 | `LOG_LEVEL` | Logging level (debug, info, warn, error) | No | `info` |
@@ -174,6 +176,7 @@ make deps
 make build
 
 # Run locally
+export SIMPLY_ACCOUNT_NAME='your-account-name'
 export SIMPLY_API_KEY='your-api-key'
 export DOMAIN_FILTER='example.com'
 make run

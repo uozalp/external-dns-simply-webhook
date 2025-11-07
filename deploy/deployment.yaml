@@ -6,11 +6,12 @@ metadata:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: simply-api-key
+  name: simply-credentials
   namespace: external-dns
 type: Opaque
 stringData:
-  api-key: "YOUR_SIMPLY_API_KEY_HERE"
+  account-name: "YOUR_USERNAME"
+  api-key: "YOUR_API_KEY"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -38,10 +39,15 @@ spec:
           name: http
           protocol: TCP
         env:
+        - name: SIMPLY_ACCOUNT_NAME
+          valueFrom:
+            secretKeyRef:
+              name: simply-credentials
+              key: account-name
         - name: SIMPLY_API_KEY
           valueFrom:
             secretKeyRef:
-              name: simply-api-key
+              name: simply-credentials
               key: api-key
         - name: LOG_LEVEL
           value: "info"
