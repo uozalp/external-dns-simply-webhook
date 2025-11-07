@@ -73,7 +73,7 @@ spec:
         args:
         - --source=service
         - --source=ingress
-        - --domain-filter=k8s.ozalp.dk  # Optional: filter to specific domains
+        - --domain-filter=ozalp.dk  # Optional: filter to specific domains
         - --provider=webhook
         - --webhook-provider-url=http://external-dns-simply-webhook.external-dns.svc.cluster.local:8080
         - --policy=upsert-only  # or 'sync' to enable deletion
