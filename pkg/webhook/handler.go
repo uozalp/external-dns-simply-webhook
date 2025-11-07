@@ -36,7 +36,14 @@ func NewHandler(client *simply.Client, logger *logrus.Logger, domainFilter []str
 func (h *Handler) GetRecords(w http.ResponseWriter, r *http.Request) {
 	h.Logger.Info("GET /records called")
 
-	var allEndpoints []*endpoint.Endpoint
+	type endpointResponse struct {
+		DNSName    string   `json:"dnsName"`
+		RecordType string   `json:"recordType"`
+		Targets    []string `json:"targets"`
+		TTL        int      `json:"ttl"`
+	}
+
+	var response []endpointResponse
 
 	// Get records for each configured domain
 	for _, domain := range h.DomainFilter {
@@ -63,21 +70,21 @@ func (h *Handler) GetRecords(w http.ResponseWriter, r *http.Request) {
 				dnsName = record.Host + "." + domain
 			}
 
-			ep := &endpoint.Endpoint{
+			ep := endpointResponse{
 				DNSName:    dnsName,
 				RecordType: record.Type,
 				Targets:    []string{record.Data},
-				RecordTTL:  endpoint.TTL(record.TTL),
+				TTL:        record.TTL,
 			}
-			allEndpoints = append(allEndpoints, ep)
+			response = append(response, ep)
 		}
 	}
 
-	h.Logger.Infof("Returning %d records across %d domains", len(allEndpoints), len(h.DomainFilter))
+	h.Logger.Infof("Returning %d records across %d domains", len(response), len(h.DomainFilter))
 
 	w.Header().Set("Content-Type", MediaTypeVersion)
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(allEndpoints)
+	json.NewEncoder(w).Encode(response)
 }
 
 // ApplyChanges applies the desired DNS record changes
