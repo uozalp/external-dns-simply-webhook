@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -63,6 +64,24 @@ func main() {
 
 	// Setup router
 	router := mux.NewRouter()
+
+	// Negotiation endpoint - responds with supported media type
+	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		accept := r.Header.Get("Accept")
+		logger.Infof("GET / called with Accept: %s", accept)
+
+		// Respond with the supported media type version
+		w.Header().Set("Content-Type", webhook.MediaTypeVersion)
+		w.WriteHeader(http.StatusOK)
+
+		// Return domain filter configuration if available
+		response := map[string]interface{}{
+			"domainFilter": domainFilterList,
+		}
+		jsonData, _ := json.Marshal(response)
+		w.Write(jsonData)
+	}).Methods("GET")
+
 	router.HandleFunc("/healthz", handler.Healthz).Methods("GET")
 	router.HandleFunc("/records", handler.GetRecords).Methods("GET")
 	router.HandleFunc("/records", handler.ApplyChanges).Methods("POST")
