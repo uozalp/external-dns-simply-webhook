@@ -103,7 +103,7 @@ func (c *Client) doRequest(method, path string, body interface{}) ([]byte, error
 
 // ListDomains retrieves all domains from Simply.com
 func (c *Client) ListDomains() ([]Domain, error) {
-	respBody, err := c.doRequest("GET", "/dns/v2/domains", nil)
+	respBody, err := c.doRequest("GET", "/2/domains", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +118,7 @@ func (c *Client) ListDomains() ([]Domain, error) {
 
 // ListRecords retrieves all DNS records for a specific domain
 func (c *Client) ListRecords(domain string) ([]Record, error) {
-	path := fmt.Sprintf("/dns/v2/records?domain=%s", url.QueryEscape(domain))
+	path := fmt.Sprintf("/2/records?domain=%s", url.QueryEscape(domain))
 	respBody, err := c.doRequest("GET", path, nil)
 	if err != nil {
 		return nil, err
@@ -158,13 +158,13 @@ func (c *Client) ListAllRecords() ([]Record, error) {
 
 // AddRecord creates a new DNS record
 func (c *Client) AddRecord(record Record) error {
-	_, err := c.doRequest("POST", "/dns/v2/record_add", record)
+	_, err := c.doRequest("POST", "/2/record_add", record)
 	return err
 }
 
 // UpdateRecord updates an existing DNS record
 func (c *Client) UpdateRecord(record Record) error {
-	_, err := c.doRequest("POST", "/dns/v2/record_update", record)
+	_, err := c.doRequest("POST", "/2/record_update", record)
 	return err
 }
 
@@ -174,7 +174,7 @@ func (c *Client) DeleteRecord(recordID int, domain string) error {
 		"id":     recordID,
 		"domain": domain,
 	}
-	_, err := c.doRequest("POST", "/dns/v2/record_delete", payload)
+	_, err := c.doRequest("POST", "/2/record_delete", payload)
 	return err
 }
 

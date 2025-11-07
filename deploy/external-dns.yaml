@@ -10,14 +10,14 @@ metadata:
   name: external-dns
 rules:
 - apiGroups: [""]
-  resources: ["services", "endpoints", "pods"]
+  resources: ["services", "endpoints", "pods", "nodes"]
   verbs: ["get", "watch", "list"]
-- apiGroups: ["extensions", "networking.k8s.io"]
+- apiGroups: ["extensions", "networking.k8sl.io"]
   resources: ["ingresses"]
   verbs: ["get", "watch", "list"]
-- apiGroups: [""]
-  resources: ["nodes"]
-  verbs: ["list"]
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
+  verbs: ["get", "watch", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -49,20 +49,35 @@ spec:
         app: external-dns
     spec:
       serviceAccountName: external-dns
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534  # nobody user
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: external-dns
         image: registry.k8s.io/external-dns/external-dns:v0.19.0
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65534
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
         args:
         - --source=service
         - --source=ingress
-        - --domain-filter=example.com  # Optional: filter to specific domains
+        - --domain-filter=k8s.ozalp.dk  # Optional: filter to specific domains
         - --provider=webhook
         - --webhook-provider-url=http://external-dns-simply-webhook.external-dns.svc.cluster.local:8080
         - --policy=upsert-only  # or 'sync' to enable deletion
         - --registry=txt
         - --txt-owner-id=my-cluster-id
         - --interval=1m
-        - --log-level=info
+        - --log-level=debug
         resources:
           requests:
             memory: "64Mi"

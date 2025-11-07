@@ -37,12 +37,15 @@ func (h *Handler) GetRecords(w http.ResponseWriter, r *http.Request) {
 	h.Logger.Info("GET /records called")
 
 	// Fetch all records from Simply.com
+	h.Logger.Debug("Fetching records from Simply.com API")
 	records, err := h.Client.ListAllRecords()
 	if err != nil {
 		h.Logger.Errorf("Failed to list records: %v", err)
 		http.Error(w, fmt.Sprintf("Failed to list records: %v", err), http.StatusInternalServerError)
 		return
 	}
+
+	h.Logger.Debugf("Retrieved %d records from Simply.com", len(records))
 
 	// Convert to ExternalDNS endpoints
 	endpoints := h.simplyToEndpoints(records)
