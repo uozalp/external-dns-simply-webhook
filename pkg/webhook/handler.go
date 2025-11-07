@@ -82,9 +82,6 @@ func (h *Handler) GetRecords(w http.ResponseWriter, r *http.Request) {
 
 	h.Logger.Infof("Returning %d records across %d domains", len(response), len(h.DomainFilter))
 
-	w.Header().Set("Content-Type", MediaTypeVersion)
-	w.WriteHeader(http.StatusOK)
-
 	// Marshal to JSON first to avoid chunked encoding
 	jsonData, err := json.Marshal(response)
 	if err != nil {
@@ -92,6 +89,10 @@ func (h *Handler) GetRecords(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+
+	w.Header().Set("Content-Type", MediaTypeVersion)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(jsonData)))
+	w.WriteHeader(http.StatusOK)
 	w.Write(jsonData)
 }
 
@@ -186,9 +187,6 @@ func (h *Handler) AdjustEndpoints(w http.ResponseWriter, r *http.Request) {
 		ep.DNSName = strings.ToLower(strings.TrimSuffix(ep.DNSName, "."))
 	}
 
-	w.Header().Set("Content-Type", MediaTypeVersion)
-	w.WriteHeader(http.StatusOK)
-
 	// Marshal to JSON first to avoid chunked encoding
 	jsonData, err := json.Marshal(endpoints)
 	if err != nil {
@@ -196,6 +194,10 @@ func (h *Handler) AdjustEndpoints(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+
+	w.Header().Set("Content-Type", MediaTypeVersion)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(jsonData)))
+	w.WriteHeader(http.StatusOK)
 	w.Write(jsonData)
 }
 
