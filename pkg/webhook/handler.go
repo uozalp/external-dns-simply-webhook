@@ -14,6 +14,7 @@ import (
 const (
 	MediaTypeVersion     = "application/external.dns.webhook+json;version=1"
 	ManagedByExternalDNS = "Managed by External-DNS"
+	DefaultTTL           = 300 // 5 minutes
 )
 
 // Handler handles webhook requests from ExternalDNS
@@ -235,13 +236,19 @@ func (h *Handler) createEndpoint(ep *endpoint.Endpoint) error {
 		return err
 	}
 
+	// Set default TTL if not specified
+	ttl := int(ep.RecordTTL)
+	if ttl == 0 {
+		ttl = DefaultTTL
+	}
+
 	// Create record for each target
 	for _, target := range ep.Targets {
 		record := simply.Record{
 			Type:    ep.RecordType,
 			Name:    ep.DNSName,
 			Data:    target,
-			TTL:     int(ep.RecordTTL),
+			TTL:     ttl,
 			Comment: ManagedByExternalDNS,
 		}
 
@@ -274,12 +281,18 @@ func (h *Handler) updateEndpoint(ep *endpoint.Endpoint) error {
 		return fmt.Errorf("no targets specified for update")
 	}
 
+	// Set default TTL if not specified
+	ttl := int(ep.RecordTTL)
+	if ttl == 0 {
+		ttl = DefaultTTL
+	}
+
 	record := simply.Record{
 		ID:      recordID,
 		Type:    ep.RecordType,
 		Name:    ep.DNSName,
 		Data:    ep.Targets[0],
-		TTL:     int(ep.RecordTTL),
+		TTL:     ttl,
 		Comment: ManagedByExternalDNS,
 	}
 
