@@ -37,12 +37,12 @@ func NewClient(accountName, apiKey string) *Client {
 
 // Record represents a DNS record in Simply.com
 type Record struct {
-	ID     int    `json:"id,omitempty"`
-	Type   string `json:"type"`
-	Host   string `json:"host"`
-	Data   string `json:"data"`
-	TTL    int    `json:"ttl"`
-	Domain string `json:"domain,omitempty"`
+	ID      int    `json:"record_id,omitempty"`
+	Type    string `json:"type"`
+	Name    string `json:"name"`
+	Data    string `json:"data"`
+	TTL     int    `json:"ttl"`
+	Comment string `json:"comment,omitempty"`
 }
 
 // makeRequest performs an HTTP request with authentication
@@ -86,6 +86,38 @@ func (c *Client) makeRequest(method, endpoint string, body interface{}) ([]byte,
 	return respBody, nil
 }
 
+// ListDomains returns all domains managed by Simply.com
+func (c *Client) ListDomains() ([]string, error) {
+	resp, err := c.makeRequest("GET", "my/products", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list products: %w", err)
+	}
+
+	var result struct {
+		Products []struct {
+			Object string `json:"object"`
+			Domain struct {
+				Name    string `json:"name"`
+				Managed bool   `json:"managed"`
+			} `json:"domain"`
+		} `json:"products"`
+	}
+
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse products response: %w", err)
+	}
+
+	var domains []string
+	for _, product := range result.Products {
+		// Only include managed domains
+		if product.Domain.Managed {
+			domains = append(domains, product.Object)
+		}
+	}
+
+	return domains, nil
+}
+
 // ListRecords returns all DNS records for a domain
 func (c *Client) ListRecords(domain string) ([]Record, error) {
 	endpoint := fmt.Sprintf("my/products/%s/dns/records", domain)
@@ -114,12 +146,11 @@ func (c *Client) ListRecords(domain string) ([]Record, error) {
 	var records []Record
 	for _, r := range response.Records {
 		records = append(records, Record{
-			ID:     r.RecordID,
-			Type:   r.Type,
-			Host:   r.Name,
-			Data:   r.Data,
-			TTL:    r.TTL,
-			Domain: domain,
+			ID:   r.RecordID,
+			Type: r.Type,
+			Name: r.Name,
+			Data: r.Data,
+			TTL:  r.TTL,
 		})
 	}
 
@@ -127,50 +158,52 @@ func (c *Client) ListRecords(domain string) ([]Record, error) {
 }
 
 // AddRecord adds a new DNS record
-func (c *Client) AddRecord(record Record) error {
-	endpoint := fmt.Sprintf("my/products/%s/dns/records", record.Domain)
+func (c *Client) AddRecord(domain string, record Record) error {
+	endpoint := fmt.Sprintf("my/products/%s/dns/records", domain)
 
 	payload := map[string]interface{}{
-		"type": record.Type,
-		"name": record.Host,
-		"data": record.Data,
-		"ttl":  record.TTL,
+		"type":    record.Type,
+		"name":    record.Name,
+		"data":    record.Data,
+		"ttl":     record.TTL,
+		"comment": record.Comment,
 	}
 
 	_, err := c.makeRequest("POST", endpoint, payload)
 	if err != nil {
-		return fmt.Errorf("failed to add record %s %s to domain %s: %w", record.Type, record.Host, record.Domain, err)
+		return fmt.Errorf("failed to add record %s %s: %w", record.Type, record.Name, err)
 	}
 
 	return nil
 }
 
 // UpdateRecord updates an existing DNS record
-func (c *Client) UpdateRecord(record Record) error {
-	endpoint := fmt.Sprintf("my/products/%s/dns/records/%d", record.Domain, record.ID)
+func (c *Client) UpdateRecord(domain string, record Record) error {
+	endpoint := fmt.Sprintf("my/products/%s/dns/records/%d", domain, record.ID)
 
 	payload := map[string]interface{}{
-		"type": record.Type,
-		"name": record.Host,
-		"data": record.Data,
-		"ttl":  record.TTL,
+		"type":    record.Type,
+		"name":    record.Name,
+		"data":    record.Data,
+		"ttl":     record.TTL,
+		"comment": record.Comment,
 	}
 
 	_, err := c.makeRequest("PUT", endpoint, payload)
 	if err != nil {
-		return fmt.Errorf("failed to update record %d in domain %s: %w", record.ID, record.Domain, err)
+		return fmt.Errorf("failed to update record %s in domain %s: %w", record.Name, domain, err)
 	}
 
 	return nil
 }
 
 // DeleteRecord deletes a DNS record
-func (c *Client) DeleteRecord(recordID int, domain string) error {
-	endpoint := fmt.Sprintf("my/products/%s/dns/records/%d", domain, recordID)
+func (c *Client) DeleteRecord(domain string, record Record) error {
+	endpoint := fmt.Sprintf("my/products/%s/dns/records/%d", domain, record.ID)
 
 	_, err := c.makeRequest("DELETE", endpoint, nil)
 	if err != nil {
-		return fmt.Errorf("failed to delete record %d from domain %s: %w", recordID, domain, err)
+		return fmt.Errorf("failed to delete record %s from domain %s: %w", record.Name, domain, err)
 	}
 
 	return nil

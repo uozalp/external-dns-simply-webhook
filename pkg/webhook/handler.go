@@ -3,7 +3,6 @@ package webhook
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
@@ -13,7 +12,8 @@ import (
 )
 
 const (
-	MediaTypeVersion = "application/external.dns.webhook+json;version=1"
+	MediaTypeVersion     = "application/external.dns.webhook+json;version=1"
+	ManagedByExternalDNS = "Managed by External-DNS"
 )
 
 // Handler handles webhook requests from ExternalDNS
@@ -32,15 +32,43 @@ func NewHandler(client *simply.Client, logger *logrus.Logger, domainFilter []str
 	}
 }
 
+func (h *Handler) Negotiate(w http.ResponseWriter, r *http.Request) {
+	accept := r.Header.Get("Accept")
+	h.Logger.Infof("GET / called with Accept: %s", accept)
+
+	// Respond with the supported media type version
+	response := map[string]interface{}{
+		"domainFilter": h.DomainFilter,
+	}
+
+	jsonData, err := json.Marshal(response)
+	if err != nil {
+		h.Logger.Errorf("Failed to marshal negotiation response: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", MediaTypeVersion)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(jsonData)))
+	w.WriteHeader(http.StatusOK)
+	w.Write(jsonData)
+}
+
 // GetRecords returns all current DNS records
 func (h *Handler) GetRecords(w http.ResponseWriter, r *http.Request) {
 	h.Logger.Info("GET /records called")
 
+	type providerSpecific struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	}
+
 	type endpointResponse struct {
-		DNSName    string   `json:"dnsName"`
-		RecordType string   `json:"recordType"`
-		Targets    []string `json:"targets"`
-		TTL        int      `json:"ttl"`
+		DNSName          string             `json:"dnsName"`
+		RecordTTL        int                `json:"recordTTL"`
+		RecordType       string             `json:"recordType"`
+		Targets          []string           `json:"targets"`
+		ProviderSpecific []providerSpecific `json:"providerSpecific,omitempty"`
 	}
 
 	var response []endpointResponse
@@ -59,22 +87,28 @@ func (h *Handler) GetRecords(w http.ResponseWriter, r *http.Request) {
 
 		// Convert Simply records to External-DNS endpoints
 		for _, record := range records {
-			h.Logger.Debugf("Processing record: ID=%d, Type=%s, Host=%s, Data=%s",
-				record.ID, record.Type, record.Host, record.Data)
+			h.Logger.Debugf("Processing record: ID=%d, Type=%s, Name=%s, Data=%s",
+				record.ID, record.Type, record.Name, record.Data)
 
 			// Build full DNS name
 			var dnsName string
-			if record.Host == "@" || record.Host == "" {
+			if record.Name == "@" || record.Name == "" {
 				dnsName = domain
 			} else {
-				dnsName = record.Host + "." + domain
+				dnsName = record.Name + "." + domain
 			}
 
 			ep := endpointResponse{
 				DNSName:    dnsName,
 				RecordType: record.Type,
 				Targets:    []string{record.Data},
-				TTL:        record.TTL,
+				RecordTTL:  record.TTL,
+				ProviderSpecific: []providerSpecific{
+					{
+						Name:  "simply-record-id",
+						Value: fmt.Sprintf("%d", record.ID),
+					},
+				},
 			}
 			response = append(response, ep)
 		}
@@ -100,65 +134,32 @@ func (h *Handler) GetRecords(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ApplyChanges(w http.ResponseWriter, r *http.Request) {
 	h.Logger.Info("POST /records called")
 
-	// Read the raw body first for logging
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		h.Logger.Errorf("Failed to read request body: %v", err)
-		http.Error(w, fmt.Sprintf("Failed to read request: %v", err), http.StatusBadRequest)
-		return
+	// Define the request structure
+	type Changes struct {
+		Create    []*endpoint.Endpoint `json:"create"`
+		UpdateOld []*endpoint.Endpoint `json:"updateOld"`
+		UpdateNew []*endpoint.Endpoint `json:"updateNew"`
+		Delete    []*endpoint.Endpoint `json:"delete"`
 	}
 
-	// Log the raw payload
-	h.Logger.Infof("Raw payload from ExternalDNS: %s", string(bodyBytes))
-
 	var changes Changes
-	if err := json.Unmarshal(bodyBytes, &changes); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&changes); err != nil {
 		h.Logger.Errorf("Failed to decode request body: %v", err)
 		http.Error(w, fmt.Sprintf("Failed to decode request: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	h.Logger.Infof("Received %d desired records, %d current records",
-		len(changes.DesiredRecords), len(changes.CurrentRecords))
+	h.Logger.Infof("Received changes: %d creates, %d updates, %d deletes",
+		len(changes.Create), len(changes.UpdateNew), len(changes.Delete))
 
-	// Log each desired record in detail
-	for i, record := range changes.DesiredRecords {
-		h.Logger.Infof("Desired record %d: DNSName=%s, Type=%s, Targets=%v, TTL=%d",
-			i+1, record.DNSName, record.RecordType, record.Targets, record.RecordTTL)
-	}
+	// Log the full request for debugging
+	reqJSON, _ := json.MarshalIndent(changes, "", "  ")
+	h.Logger.Debugf("Full request payload:\n%s", string(reqJSON))
 
-	// Log each current record in detail
-	for i, record := range changes.CurrentRecords {
-		h.Logger.Infof("Current record %d: DNSName=%s, Type=%s, Targets=%v, TTL=%d",
-			i+1, record.DNSName, record.RecordType, record.Targets, record.RecordTTL)
-	}
-
-	// Calculate the changes needed
-	creates, updates, deletes := h.calculateChanges(changes.CurrentRecords, changes.DesiredRecords)
-
-	h.Logger.Infof("Changes: %d creates, %d updates, %d deletes",
-		len(creates), len(updates), len(deletes))
-
-	// Apply deletions first
-	for _, ep := range deletes {
-		if err := h.deleteEndpoint(ep); err != nil {
-			h.Logger.Errorf("Failed to delete endpoint %s: %v", ep.DNSName, err)
-			http.Error(w, fmt.Sprintf("Failed to delete record: %v", err), http.StatusInternalServerError)
-			return
-		}
-	}
-
-	// Apply updates
-	for _, ep := range updates {
-		if err := h.updateEndpoint(ep); err != nil {
-			h.Logger.Errorf("Failed to update endpoint %s: %v", ep.DNSName, err)
-			http.Error(w, fmt.Sprintf("Failed to update record: %v", err), http.StatusInternalServerError)
-			return
-		}
-	}
-
-	// Apply creates
-	for _, ep := range creates {
+	// Process creates
+	for _, ep := range changes.Create {
+		h.Logger.Infof("Creating record: %s %s -> %v (TTL: %d)",
+			ep.DNSName, ep.RecordType, ep.Targets, ep.RecordTTL)
 		if err := h.createEndpoint(ep); err != nil {
 			h.Logger.Errorf("Failed to create endpoint %s: %v", ep.DNSName, err)
 			http.Error(w, fmt.Sprintf("Failed to create record: %v", err), http.StatusInternalServerError)
@@ -166,9 +167,29 @@ func (h *Handler) ApplyChanges(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Process updates (we only need UpdateNew since we have the record ID)
+	for _, ep := range changes.UpdateNew {
+		h.Logger.Infof("Updating record: %s %s -> %v (TTL: %d)",
+			ep.DNSName, ep.RecordType, ep.Targets, ep.RecordTTL)
+		if err := h.updateEndpoint(ep); err != nil {
+			h.Logger.Errorf("Failed to update endpoint %s: %v", ep.DNSName, err)
+			http.Error(w, fmt.Sprintf("Failed to update record: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Process deletes
+	for _, ep := range changes.Delete {
+		h.Logger.Infof("Deleting record: %s %s", ep.DNSName, ep.RecordType)
+		if err := h.deleteEndpoint(ep); err != nil {
+			h.Logger.Errorf("Failed to delete endpoint %s: %v", ep.DNSName, err)
+			http.Error(w, fmt.Sprintf("Failed to delete record: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+
 	h.Logger.Info("Successfully applied all changes")
-	w.Header().Set("Content-Type", MediaTypeVersion)
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // AdjustEndpoints allows normalization or filtering of endpoints
@@ -207,98 +228,27 @@ func (h *Handler) Healthz(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("OK"))
 }
 
-// Changes represents the change request from ExternalDNS
-type Changes struct {
-	DesiredRecords []*endpoint.Endpoint `json:"desiredRecords"`
-	CurrentRecords []*endpoint.Endpoint `json:"currentRecords"`
-}
-
-// calculateChanges determines which endpoints need to be created, updated, or deleted
-func (h *Handler) calculateChanges(current, desired []*endpoint.Endpoint) (creates, updates, deletes []*endpoint.Endpoint) {
-	currentMap := make(map[string]*endpoint.Endpoint)
-	for _, ep := range current {
-		key := fmt.Sprintf("%s|%s", ep.DNSName, ep.RecordType)
-		currentMap[key] = ep
-	}
-
-	desiredMap := make(map[string]*endpoint.Endpoint)
-	for _, ep := range desired {
-		key := fmt.Sprintf("%s|%s", ep.DNSName, ep.RecordType)
-		desiredMap[key] = ep
-	}
-
-	// Find creates and updates
-	for key, desiredEp := range desiredMap {
-		if currentEp, exists := currentMap[key]; exists {
-			// Check if update is needed
-			if !endpointsEqual(currentEp, desiredEp) {
-				// Copy the record ID from current to desired
-				desiredEp.ProviderSpecific = currentEp.ProviderSpecific
-				updates = append(updates, desiredEp)
-			}
-		} else {
-			creates = append(creates, desiredEp)
-		}
-	}
-
-	// Find deletes
-	for key, currentEp := range currentMap {
-		if _, exists := desiredMap[key]; !exists {
-			deletes = append(deletes, currentEp)
-		}
-	}
-
-	return creates, updates, deletes
-}
-
-// endpointsEqual checks if two endpoints are equal
-func endpointsEqual(a, b *endpoint.Endpoint) bool {
-	if a.DNSName != b.DNSName || a.RecordType != b.RecordType {
-		return false
-	}
-
-	if len(a.Targets) != len(b.Targets) {
-		return false
-	}
-
-	targetMap := make(map[string]bool)
-	for _, t := range a.Targets {
-		targetMap[t] = true
-	}
-	for _, t := range b.Targets {
-		if !targetMap[t] {
-			return false
-		}
-	}
-
-	return a.RecordTTL == b.RecordTTL
-}
-
 // createEndpoint creates a new DNS record
 func (h *Handler) createEndpoint(ep *endpoint.Endpoint) error {
-	// Extract domain from DNS name (simple approach - last two parts)
-	parts := strings.Split(ep.DNSName, ".")
-	if len(parts) < 2 {
-		return fmt.Errorf("invalid DNS name: %s", ep.DNSName)
+	domain, err := h.extractDomain(ep.DNSName)
+	if err != nil {
+		return err
 	}
 
-	domain := strings.Join(parts[len(parts)-2:], ".")
-	host := strings.Join(parts[:len(parts)-2], ".")
-	if host == "" {
-		host = "@"
-	}
-
+	// Create record for each target
 	for _, target := range ep.Targets {
 		record := simply.Record{
-			Type:   ep.RecordType,
-			Host:   host,
-			Data:   target,
-			TTL:    int(ep.RecordTTL),
-			Domain: domain,
+			Type:    ep.RecordType,
+			Name:    ep.DNSName,
+			Data:    target,
+			TTL:     int(ep.RecordTTL),
+			Comment: ManagedByExternalDNS,
 		}
 
-		h.Logger.Infof("Creating record: %s %s %s (TTL: %d)", record.Type, ep.DNSName, target, record.TTL)
-		if err := h.Client.AddRecord(record); err != nil {
+		h.Logger.Infof("Creating Simply.com record: domain=%s, name=%s, type=%s, data=%s, ttl=%d",
+			domain, record.Name, record.Type, record.Data, record.TTL)
+
+		if err := h.Client.AddRecord(domain, record); err != nil {
 			return fmt.Errorf("failed to add record: %w", err)
 		}
 	}
@@ -308,47 +258,35 @@ func (h *Handler) createEndpoint(ep *endpoint.Endpoint) error {
 
 // updateEndpoint updates an existing DNS record
 func (h *Handler) updateEndpoint(ep *endpoint.Endpoint) error {
-	// Extract domain from DNS name
-	parts := strings.Split(ep.DNSName, ".")
-	if len(parts) < 2 {
-		return fmt.Errorf("invalid DNS name: %s", ep.DNSName)
+	// Extract Simply.com record ID from providerSpecific
+	recordID, err := h.getRecordID(ep)
+	if err != nil {
+		return fmt.Errorf("failed to get record ID: %w", err)
 	}
 
-	domain := strings.Join(parts[len(parts)-2:], ".")
-	host := strings.Join(parts[:len(parts)-2], ".")
-	if host == "" {
-		host = "@"
+	domain, err := h.extractDomain(ep.DNSName)
+	if err != nil {
+		return err
 	}
 
-	// Get the record ID from provider specific properties
-	recordID := 0
-	for _, prop := range ep.ProviderSpecific {
-		if prop.Name == "simply-record-id" {
-			fmt.Sscanf(prop.Value, "%d", &recordID)
-			break
-		}
-	}
-
-	if recordID == 0 {
-		return fmt.Errorf("record ID not found for %s", ep.DNSName)
-	}
-
-	// For simplicity, we'll use the first target
+	// Update record (assuming single target for updates)
 	if len(ep.Targets) == 0 {
-		return fmt.Errorf("no targets specified for %s", ep.DNSName)
+		return fmt.Errorf("no targets specified for update")
 	}
 
 	record := simply.Record{
-		ID:     recordID,
-		Type:   ep.RecordType,
-		Host:   host,
-		Data:   ep.Targets[0],
-		TTL:    int(ep.RecordTTL),
-		Domain: domain,
+		ID:      recordID,
+		Type:    ep.RecordType,
+		Name:    ep.DNSName,
+		Data:    ep.Targets[0],
+		TTL:     int(ep.RecordTTL),
+		Comment: ManagedByExternalDNS,
 	}
 
-	h.Logger.Infof("Updating record: %s %s %s (TTL: %d)", record.Type, ep.DNSName, record.Data, record.TTL)
-	if err := h.Client.UpdateRecord(record); err != nil {
+	h.Logger.Infof("Updating Simply.com record: id=%d, domain=%s, name=%s, type=%s, data=%s, ttl=%d",
+		recordID, domain, record.Name, record.Type, record.Data, record.TTL)
+
+	if err := h.Client.UpdateRecord(domain, record); err != nil {
 		return fmt.Errorf("failed to update record: %w", err)
 	}
 
@@ -357,31 +295,56 @@ func (h *Handler) updateEndpoint(ep *endpoint.Endpoint) error {
 
 // deleteEndpoint deletes a DNS record
 func (h *Handler) deleteEndpoint(ep *endpoint.Endpoint) error {
-	// Extract domain from DNS name
-	parts := strings.Split(ep.DNSName, ".")
-	if len(parts) < 2 {
-		return fmt.Errorf("invalid DNS name: %s", ep.DNSName)
+	// Extract Simply.com record ID from providerSpecific
+	recordID, err := h.getRecordID(ep)
+	if err != nil {
+		return fmt.Errorf("failed to get record ID: %w", err)
 	}
 
-	domain := strings.Join(parts[len(parts)-2:], ".")
-
-	// Get the record ID from provider specific properties
-	recordID := 0
-	for _, prop := range ep.ProviderSpecific {
-		if prop.Name == "simply-record-id" {
-			fmt.Sscanf(prop.Value, "%d", &recordID)
-			break
-		}
+	domain, err := h.extractDomain(ep.DNSName)
+	if err != nil {
+		return err
 	}
 
-	if recordID == 0 {
-		return fmt.Errorf("record ID not found for %s", ep.DNSName)
+	record := simply.Record{
+		ID:      recordID,
+		Type:    ep.RecordType,
+		Name:    ep.DNSName,
+		Data:    ep.Targets[0],
+		TTL:     int(ep.RecordTTL),
+		Comment: ManagedByExternalDNS,
 	}
 
-	h.Logger.Infof("Deleting record: %s %s", ep.RecordType, ep.DNSName)
-	if err := h.Client.DeleteRecord(recordID, domain); err != nil {
+	h.Logger.Infof("Deleting Simply.com record id=%d, domain=%s, name=%s, type=%s, data=%s, ttl=%d",
+		recordID, domain, record.Name, record.Type, record.Data, record.TTL)
+
+	if err := h.Client.DeleteRecord(domain, record); err != nil {
 		return fmt.Errorf("failed to delete record: %w", err)
 	}
 
 	return nil
+}
+
+// getRecordID extracts the Simply.com record ID from providerSpecific field
+func (h *Handler) getRecordID(ep *endpoint.Endpoint) (int, error) {
+	for _, ps := range ep.ProviderSpecific {
+		if ps.Name == "simply-record-id" {
+			var recordID int
+			_, err := fmt.Sscanf(ps.Value, "%d", &recordID)
+			if err != nil {
+				return 0, fmt.Errorf("invalid record ID: %s", ps.Value)
+			}
+			return recordID, nil
+		}
+	}
+	return 0, fmt.Errorf("simply-record-id not found in providerSpecific")
+}
+
+// extractDomain extracts the base domain from a DNS name
+func (h *Handler) extractDomain(dnsName string) (string, error) {
+	parts := strings.Split(dnsName, ".")
+	if len(parts) < 2 {
+		return "", fmt.Errorf("invalid DNS name: %s", dnsName)
+	}
+	return strings.Join(parts[len(parts)-2:], "."), nil
 }

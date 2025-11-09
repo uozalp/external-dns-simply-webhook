@@ -3,7 +3,7 @@ kind: Service
 metadata:
   name: test-dns
   annotations:
-    external-dns.alpha.kubernetes.io/hostname: test.k8s.ozalp.dk
+    external-dns.alpha.kubernetes.io/hostname: test3.k8s.ozalp.dk
     external-dns.alpha.kubernetes.io/ttl: "300"
 spec:
   type: LoadBalancer
