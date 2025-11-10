@@ -14,7 +14,7 @@ import (
 const (
 	MediaTypeVersion     = "application/external.dns.webhook+json;version=1"
 	ManagedByExternalDNS = "Managed by External-DNS"
-	DefaultTTL           = 300 // 5 minutes
+	DefaultTTL           = 3600 // 1 hour
 )
 
 // Handler handles webhook requests from ExternalDNS
@@ -106,7 +106,7 @@ func (h *Handler) GetRecords(w http.ResponseWriter, r *http.Request) {
 				RecordTTL:  record.TTL,
 				ProviderSpecific: []providerSpecific{
 					{
-						Name:  "simply-record-id",
+						Name:  "external-dns-ignore/simply-record-id",
 						Value: fmt.Sprintf("%d", record.ID),
 					},
 				},
