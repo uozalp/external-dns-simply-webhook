@@ -341,7 +341,7 @@ func (h *Handler) deleteEndpoint(ep *endpoint.Endpoint) error {
 // getRecordID extracts the Simply.com record ID from providerSpecific field
 func (h *Handler) getRecordID(ep *endpoint.Endpoint) (int, error) {
 	for _, ps := range ep.ProviderSpecific {
-		if ps.Name == "simply-record-id" {
+		if ps.Name == "external-dns-ignore/simply-record-id" {
 			var recordID int
 			_, err := fmt.Sscanf(ps.Value, "%d", &recordID)
 			if err != nil {
@@ -350,7 +350,7 @@ func (h *Handler) getRecordID(ep *endpoint.Endpoint) (int, error) {
 			return recordID, nil
 		}
 	}
-	return 0, fmt.Errorf("simply-record-id not found in providerSpecific")
+	return 0, fmt.Errorf("external-dns-ignore/simply-record-id not found in providerSpecific")
 }
 
 // extractDomain extracts the base domain from a DNS name
