@@ -4,8 +4,10 @@ metadata:
   name: test-dns
   namespace: default
   annotations:
-    external-dns.alpha.kubernetes.io/hostname: test8.k8s.ozalp.dk
+    external-dns.alpha.kubernetes.io/hostname: test9.k8s.ozalp.dk
     external-dns.alpha.kubernetes.io/ttl: "3710"
+    external-dns.alpha.kubernetes.io/comment: "test comment"
+    external-dns.alpha.kubernetes.io/record-weight: "42"
     external-dns.alpha.kubernetes.io/provider-specific: '[{"name":"test-dns","value":"25465820"}]'
 spec:
   type: ClusterIP
@@ -27,6 +29,3 @@ spec:
     targets:
     - 10.0.0.1
     recordTTL: 300
-    providerSpecific:
-    - name: user-managed-key  # ← Without the ignore prefix
-      value: "user-value-123"

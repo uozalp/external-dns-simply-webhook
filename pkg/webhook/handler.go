@@ -57,7 +57,6 @@ func (h *Handler) Negotiate(w http.ResponseWriter, r *http.Request) {
 
 // GetRecords returns all current DNS records
 func (h *Handler) GetRecords(w http.ResponseWriter, r *http.Request) {
-	h.Logger.Info("GET /records called")
 
 	type endpointResponse struct {
 		DNSName    string   `json:"dnsName"`
@@ -121,7 +120,6 @@ func (h *Handler) GetRecords(w http.ResponseWriter, r *http.Request) {
 
 // ApplyChanges applies the desired DNS record changes
 func (h *Handler) ApplyChanges(w http.ResponseWriter, r *http.Request) {
-	h.Logger.Info("POST /records called")
 
 	// Define the request structure
 	type Changes struct {
@@ -169,11 +167,8 @@ func (h *Handler) ApplyChanges(w http.ResponseWriter, r *http.Request) {
 			// Create lookup key: dnsName:recordType
 			key := fmt.Sprintf("%s:%s", dnsName, record.Type)
 			recordMap[key] = record
-			h.Logger.Debugf("Added to map: %s -> ID=%d", key, record.ID)
 		}
 	}
-
-	h.Logger.Infof("Loaded %d existing records into map", len(recordMap))
 
 	// Process creates
 	for _, ep := range changes.Create {
@@ -255,7 +250,6 @@ func (h *Handler) ApplyChanges(w http.ResponseWriter, r *http.Request) {
 
 // AdjustEndpoints allows normalization or filtering of endpoints
 func (h *Handler) AdjustEndpoints(w http.ResponseWriter, r *http.Request) {
-	h.Logger.Info("POST /adjustendpoints called")
 
 	var endpoints []*endpoint.Endpoint
 	if err := json.NewDecoder(r.Body).Decode(&endpoints); err != nil {

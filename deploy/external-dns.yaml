@@ -86,7 +86,7 @@ spec:
         - --policy=upsert-only  # or 'sync' to enable deletion
         - --registry=txt
         - --txt-owner-id=my-cluster-id
-        - --interval=5m
+        - --interval=1m
         - --log-level=debug
         - --publish-internal-services # temp fix for internal services not being published
         resources:
