@@ -34,9 +34,6 @@ func NewHandler(client *simply.Client, logger *logrus.Logger, domainFilter []str
 }
 
 func (h *Handler) Negotiate(w http.ResponseWriter, r *http.Request) {
-	accept := r.Header.Get("Accept")
-	h.Logger.Infof("GET / called with Accept: %s", accept)
-
 	// Respond with the supported media type version
 	response := map[string]interface{}{
 		"domainFilter": h.DomainFilter,
@@ -69,7 +66,6 @@ func (h *Handler) GetRecords(w http.ResponseWriter, r *http.Request) {
 
 	// Get records for each configured domain
 	for _, domain := range h.DomainFilter {
-		h.Logger.Infof("Fetching records for domain: %s", domain)
 
 		records, err := h.Client.ListRecords(domain)
 		if err != nil {
@@ -77,7 +73,7 @@ func (h *Handler) GetRecords(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		h.Logger.Infof("Found %d records for domain %s", len(records), domain)
+		h.Logger.Debugf("Found %d records for domain %s", len(records), domain)
 
 		// Convert Simply records to External-DNS endpoints
 		for _, record := range records {
@@ -172,8 +168,6 @@ func (h *Handler) ApplyChanges(w http.ResponseWriter, r *http.Request) {
 
 	// Process creates
 	for _, ep := range changes.Create {
-		h.Logger.Infof("Creating record: %s %s -> %v (TTL: %d)",
-			ep.DNSName, ep.RecordType, ep.Targets, ep.RecordTTL)
 		if err := h.createEndpoint(ep); err != nil {
 			h.Logger.Errorf("Failed to create endpoint %s: %v", ep.DNSName, err)
 			http.Error(w, fmt.Sprintf("Failed to create record: %v", err), http.StatusInternalServerError)
@@ -216,9 +210,6 @@ func (h *Handler) ApplyChanges(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		h.Logger.Infof("Updating record: %s %s -> %v (TTL: %d)",
-			newEp.DNSName, newEp.RecordType, newEp.Targets, newEp.RecordTTL)
-
 		if err := h.updateEndpoint(newEp, existingRecord.ID); err != nil {
 			h.Logger.Errorf("Failed to update endpoint %s: %v", newEp.DNSName, err)
 			http.Error(w, fmt.Sprintf("Failed to update record: %v", err), http.StatusInternalServerError)
@@ -234,8 +225,6 @@ func (h *Handler) ApplyChanges(w http.ResponseWriter, r *http.Request) {
 			h.Logger.Warnf("Record not found in map for deletion, skipping: %s", key)
 			continue
 		}
-
-		h.Logger.Infof("Deleting record: %s %s (ID: %d)", ep.DNSName, ep.RecordType, existingRecord.ID)
 
 		if err := h.deleteEndpoint(ep, existingRecord.ID); err != nil {
 			h.Logger.Errorf("Failed to delete endpoint %s: %v", ep.DNSName, err)
