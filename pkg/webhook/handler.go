@@ -59,17 +59,11 @@ func (h *Handler) Negotiate(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) GetRecords(w http.ResponseWriter, r *http.Request) {
 	h.Logger.Info("GET /records called")
 
-	type providerSpecific struct {
-		Name  string `json:"name"`
-		Value string `json:"value"`
-	}
-
 	type endpointResponse struct {
-		DNSName          string             `json:"dnsName"`
-		RecordTTL        int                `json:"recordTTL"`
-		RecordType       string             `json:"recordType"`
-		Targets          []string           `json:"targets"`
-		ProviderSpecific []providerSpecific `json:"providerSpecific,omitempty"`
+		DNSName    string   `json:"dnsName"`
+		RecordTTL  int      `json:"recordTTL"`
+		RecordType string   `json:"recordType"`
+		Targets    []string `json:"targets"`
 	}
 
 	var response []endpointResponse
@@ -104,12 +98,6 @@ func (h *Handler) GetRecords(w http.ResponseWriter, r *http.Request) {
 				RecordType: record.Type,
 				Targets:    []string{record.Data},
 				RecordTTL:  record.TTL,
-				ProviderSpecific: []providerSpecific{
-					{
-						Name:  "external-dns-ignore/simply-record-id",
-						Value: fmt.Sprintf("%d", record.ID),
-					},
-				},
 			}
 			response = append(response, ep)
 		}
@@ -157,6 +145,36 @@ func (h *Handler) ApplyChanges(w http.ResponseWriter, r *http.Request) {
 	reqJSON, _ := json.MarshalIndent(changes, "", "  ")
 	h.Logger.Debugf("Full request payload:\n%s", string(reqJSON))
 
+	// Fetch all records from all domains and build a lookup map
+	// Key: dnsName:recordType, Value: simply.Record
+	recordMap := make(map[string]simply.Record)
+
+	for _, domain := range h.DomainFilter {
+		records, err := h.Client.ListRecords(domain)
+		if err != nil {
+			h.Logger.Errorf("Failed to list records for domain %s: %v", domain, err)
+			http.Error(w, fmt.Sprintf("Failed to list records: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		for _, record := range records {
+			// Build full DNS name
+			var dnsName string
+			if record.Name == "@" || record.Name == "" {
+				dnsName = domain
+			} else {
+				dnsName = record.Name + "." + domain
+			}
+
+			// Create lookup key: dnsName:recordType
+			key := fmt.Sprintf("%s:%s", dnsName, record.Type)
+			recordMap[key] = record
+			h.Logger.Debugf("Added to map: %s -> ID=%d", key, record.ID)
+		}
+	}
+
+	h.Logger.Infof("Loaded %d existing records into map", len(recordMap))
+
 	// Process creates
 	for _, ep := range changes.Create {
 		h.Logger.Infof("Creating record: %s %s -> %v (TTL: %d)",
@@ -168,21 +186,63 @@ func (h *Handler) ApplyChanges(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Process updates (we only need UpdateNew since we have the record ID)
-	for _, ep := range changes.UpdateNew {
+	// Process updates - compare old and new to detect actual changes
+	for i, newEp := range changes.UpdateNew {
+		oldEp := changes.UpdateOld[i]
+
+		// Check if there are actual changes
+		hasChanges := false
+		if oldEp.RecordType != newEp.RecordType {
+			hasChanges = true
+		} else if oldEp.RecordTTL != newEp.RecordTTL {
+			hasChanges = true
+		} else {
+			// Compare targets
+			for j, oldTarget := range oldEp.Targets {
+				if j >= len(newEp.Targets) || oldTarget != newEp.Targets[j] {
+					hasChanges = true
+					break
+				}
+			}
+		}
+
+		if !hasChanges {
+			h.Logger.Infof("Skipping update for %s %s - no actual changes detected",
+				newEp.DNSName, newEp.RecordType)
+			continue
+		}
+
+		// Lookup record ID from map
+		key := fmt.Sprintf("%s:%s", newEp.DNSName, newEp.RecordType)
+		existingRecord, found := recordMap[key]
+		if !found {
+			h.Logger.Errorf("Record not found in map for update: %s", key)
+			http.Error(w, fmt.Sprintf("Record not found: %s", key), http.StatusInternalServerError)
+			return
+		}
+
 		h.Logger.Infof("Updating record: %s %s -> %v (TTL: %d)",
-			ep.DNSName, ep.RecordType, ep.Targets, ep.RecordTTL)
-		if err := h.updateEndpoint(ep); err != nil {
-			h.Logger.Errorf("Failed to update endpoint %s: %v", ep.DNSName, err)
+			newEp.DNSName, newEp.RecordType, newEp.Targets, newEp.RecordTTL)
+
+		if err := h.updateEndpoint(newEp, existingRecord.ID); err != nil {
+			h.Logger.Errorf("Failed to update endpoint %s: %v", newEp.DNSName, err)
 			http.Error(w, fmt.Sprintf("Failed to update record: %v", err), http.StatusInternalServerError)
 			return
 		}
 	}
 
-	// Process deletes
+	// Process deletes - lookup record ID from map
 	for _, ep := range changes.Delete {
-		h.Logger.Infof("Deleting record: %s %s", ep.DNSName, ep.RecordType)
-		if err := h.deleteEndpoint(ep); err != nil {
+		key := fmt.Sprintf("%s:%s", ep.DNSName, ep.RecordType)
+		existingRecord, found := recordMap[key]
+		if !found {
+			h.Logger.Warnf("Record not found in map for deletion, skipping: %s", key)
+			continue
+		}
+
+		h.Logger.Infof("Deleting record: %s %s (ID: %d)", ep.DNSName, ep.RecordType, existingRecord.ID)
+
+		if err := h.deleteEndpoint(ep, existingRecord.ID); err != nil {
 			h.Logger.Errorf("Failed to delete endpoint %s: %v", ep.DNSName, err)
 			http.Error(w, fmt.Sprintf("Failed to delete record: %v", err), http.StatusInternalServerError)
 			return
@@ -264,19 +324,12 @@ func (h *Handler) createEndpoint(ep *endpoint.Endpoint) error {
 }
 
 // updateEndpoint updates an existing DNS record
-func (h *Handler) updateEndpoint(ep *endpoint.Endpoint) error {
-	// Extract Simply.com record ID from providerSpecific
-	recordID, err := h.getRecordID(ep)
-	if err != nil {
-		return fmt.Errorf("failed to get record ID: %w", err)
-	}
-
+func (h *Handler) updateEndpoint(ep *endpoint.Endpoint, recordID int) error {
 	domain, err := h.extractDomain(ep.DNSName)
 	if err != nil {
 		return err
 	}
 
-	// Update record (assuming single target for updates)
 	if len(ep.Targets) == 0 {
 		return fmt.Errorf("no targets specified for update")
 	}
@@ -307,13 +360,7 @@ func (h *Handler) updateEndpoint(ep *endpoint.Endpoint) error {
 }
 
 // deleteEndpoint deletes a DNS record
-func (h *Handler) deleteEndpoint(ep *endpoint.Endpoint) error {
-	// Extract Simply.com record ID from providerSpecific
-	recordID, err := h.getRecordID(ep)
-	if err != nil {
-		return fmt.Errorf("failed to get record ID: %w", err)
-	}
-
+func (h *Handler) deleteEndpoint(ep *endpoint.Endpoint, recordID int) error {
 	domain, err := h.extractDomain(ep.DNSName)
 	if err != nil {
 		return err
@@ -328,29 +375,14 @@ func (h *Handler) deleteEndpoint(ep *endpoint.Endpoint) error {
 		Comment: ManagedByExternalDNS,
 	}
 
-	h.Logger.Infof("Deleting Simply.com record id=%d, domain=%s, name=%s, type=%s, data=%s, ttl=%d",
-		recordID, domain, record.Name, record.Type, record.Data, record.TTL)
+	h.Logger.Infof("Deleting Simply.com record id=%d, domain=%s, name=%s, type=%s",
+		recordID, domain, record.Name, record.Type)
 
 	if err := h.Client.DeleteRecord(domain, record); err != nil {
 		return fmt.Errorf("failed to delete record: %w", err)
 	}
 
 	return nil
-}
-
-// getRecordID extracts the Simply.com record ID from providerSpecific field
-func (h *Handler) getRecordID(ep *endpoint.Endpoint) (int, error) {
-	for _, ps := range ep.ProviderSpecific {
-		if ps.Name == "external-dns-ignore/simply-record-id" {
-			var recordID int
-			_, err := fmt.Sscanf(ps.Value, "%d", &recordID)
-			if err != nil {
-				return 0, fmt.Errorf("invalid record ID: %s", ps.Value)
-			}
-			return recordID, nil
-		}
-	}
-	return 0, fmt.Errorf("external-dns-ignore/simply-record-id not found in providerSpecific")
 }
 
 // extractDomain extracts the base domain from a DNS name

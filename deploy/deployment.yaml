@@ -22,7 +22,7 @@ spec:
     spec:
       containers:
       - name: webhook
-        image: ghcr.io/uozalp/external-dns-simply-webhook:1.0.10
+        image: ghcr.io/uozalp/external-dns-simply-webhook:1.0.12
         imagePullPolicy: Always
         ports:
         - containerPort: 8888

@@ -21,6 +21,12 @@ rules:
 - apiGroups: ["discovery.k8s.io"]
   resources: ["endpointslices"]
   verbs: ["get", "watch", "list"]
+- apiGroups: ["externaldns.k8s.io"]
+  resources: ["dnsendpoints"]
+  verbs: ["get", "watch", "list"]
+- apiGroups: ["externaldns.k8s.io"]
+  resources: ["dnsendpoints/status"]
+  verbs: ["update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -59,7 +65,8 @@ spec:
           type: RuntimeDefault
       containers:
       - name: external-dns
-        image: registry.k8s.io/external-dns/external-dns:v0.19.0
+        image: registry.k8s.io/external-dns/external-dns:v0.20.0
+        imagePullPolicy: Always
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
@@ -79,7 +86,7 @@ spec:
         - --policy=upsert-only  # or 'sync' to enable deletion
         - --registry=txt
         - --txt-owner-id=my-cluster-id
-        - --interval=1m
+        - --interval=5m
         - --log-level=debug
         - --publish-internal-services # temp fix for internal services not being published
         resources:
