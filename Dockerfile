@@ -18,13 +18,16 @@ FROM alpine:latest
 
 RUN apk --no-cache add ca-certificates
 
-WORKDIR /root/
+WORKDIR /app
 
 # Copy the binary from builder
-COPY --from=builder /app/external-dns-simply-webhook .
+COPY --from=builder --chmod=0755 /app/external-dns-simply-webhook /app/external-dns-simply-webhook
+
+# Use non-root user
+USER 65534:65534
 
 # Expose the default port
 EXPOSE 8888
 
 # Run the application
-CMD ["./external-dns-simply-webhook"]
+CMD ["/app/external-dns-simply-webhook"]
