@@ -1,0 +1,73 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: external-dns
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: external-dns-simply-webhook
+  namespace: external-dns
+  labels:
+    app: external-dns-simply-webhook
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: external-dns-simply-webhook
+  template:
+    metadata:
+      labels:
+        app: external-dns-simply-webhook
+    spec:
+      containers:
+      - name: webhook
+        image: ghcr.io/uozalp/external-dns-simply-webhook:latest
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 65534
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+        ports:
+        - containerPort: 8888
+          name: http
+          protocol: TCP
+        env:
+        - name: SIMPLY_ACCOUNT_NAME
+          valueFrom:
+            secretKeyRef:
+              name: simply-credentials
+              key: account-name
+        - name: SIMPLY_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: simply-credentials
+              key: api-key
+        - name: LOG_LEVEL
+          value: "info"
+        - name: DOMAIN_FILTER
+          value: "example.com"  # Optional: filter to specific domains
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
