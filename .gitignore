@@ -33,3 +33,7 @@ go.work.sum
 # .vscode/
 
 debug/*
+
+*.local
+*.tgz
+/dist/
