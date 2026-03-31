@@ -1,0 +1,6 @@
+apiVersion: v2
+name: external-dns-simply
+description: ExternalDNS with Simply.com webhook provider
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
