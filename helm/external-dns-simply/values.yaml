@@ -14,30 +14,6 @@ webhook:
       cpu: "200m"
   logLevel: "info"
 
-# External-DNS
-externalDns:
-  image:
-    repository: registry.k8s.io/external-dns/external-dns
-    tag: v0.20.0
-    pullPolicy: IfNotPresent
-  sources:
-    - service
-    - ingress
-  policy: upsert-only
-  registry: txt
-  txtOwnerId: my-cluster-id
-  interval: 1m
-  logLevel: info
-  publishInternalServices: false
-  extraArgs: []
-  resources:
-    requests:
-      memory: "64Mi"
-      cpu: "100m"
-    limits:
-      memory: "128Mi"
-      cpu: "200m"
-
 # Domain filter (comma-separated list of domains, or empty for all)
 domainFilter: ""
 
@@ -49,6 +25,5 @@ simply:
   apiKeyKey: api-key
 
 # Common
-replicaCount: 1
 nameOverride: ""
 fullnameOverride: ""

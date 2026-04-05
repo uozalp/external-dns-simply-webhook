@@ -34,6 +34,33 @@ This webhook adapter allows ExternalDNS to manage DNS records in Simply.com via 
 
 ### 2. Deploy the Webhook
 
+#### Using Helm
+
+```bash
+kubectl create namespace external-dns
+
+kubectl create secret generic simply-credentials \
+  --from-literal=account-name='YOUR_ACCOUNT_NAME' \
+  --from-literal=api-key='YOUR_API_KEY' \
+  -n external-dns
+
+helm install external-dns-simply \
+  oci://ghcr.io/uozalp/helm/external-dns-simply \
+  -n external-dns \
+  --set domainFilter=example.com
+```
+
+Then install ExternalDNS separately (e.g. via the [official Helm chart](https://artifacthub.io/packages/helm/external-dns/external-dns)) and point it to the webhook:
+
+```bash
+helm repo add external-dns https://kubernetes-sigs.github.io/external-dns/
+
+helm install external-dns external-dns/external-dns \
+  -n external-dns \
+  --set provider.name=webhook \
+  --set "extraArgs[0]=--webhook-provider-url=http://external-dns-simply.external-dns.svc.cluster.local:8888"
+```
+
 #### Using kubectl
 
 ```bash

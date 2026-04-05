@@ -33,25 +33,9 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
 {{/*
-Selector labels for the webhook
+Selector labels
 */}}
 {{- define "external-dns-simply.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "external-dns-simply.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
-{{- end }}
-
-{{/*
-Webhook component name
-*/}}
-{{- define "external-dns-simply.webhook.fullname" -}}
-{{- printf "%s-webhook" (include "external-dns-simply.fullname" .) }}
-{{- end }}
-
-{{/*
-Selector labels for external-dns
-*/}}
-{{- define "external-dns-simply.externalDns.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "external-dns-simply.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
-app.kubernetes.io/component: external-dns
 {{- end }}

@@ -1,22 +1,19 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "external-dns-simply.webhook.fullname" . }}
+  name: {{ include "external-dns-simply.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "external-dns-simply.labels" . | nindent 4 }}
-    app.kubernetes.io/component: webhook
 spec:
-  replicas: {{ .Values.replicaCount }}
+  replicas: 1
   selector:
     matchLabels:
       {{- include "external-dns-simply.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: webhook
   template:
     metadata:
       labels:
         {{- include "external-dns-simply.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: webhook
     spec:
       containers:
         - name: webhook

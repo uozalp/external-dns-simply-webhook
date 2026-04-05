@@ -1,11 +1,10 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "external-dns-simply.webhook.fullname" . }}
+  name: {{ include "external-dns-simply.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "external-dns-simply.labels" . | nindent 4 }}
-    app.kubernetes.io/component: webhook
 spec:
   type: ClusterIP
   ports:
@@ -15,4 +14,3 @@ spec:
       name: http
   selector:
     {{- include "external-dns-simply.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: webhook
