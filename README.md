@@ -1,6 +1,6 @@
 # ExternalDNS Webhook Provider for Simply.com
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A webhook provider for [ExternalDNS](https://github.com/kubernetes-sigs/external-dns) that enables automatic DNS record management in [Simply.com](https://www.simply.com/).
 
@@ -180,7 +180,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
 
