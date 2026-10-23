@@ -11,20 +11,15 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o external-dns-simply-webhook ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o external-dns-simply-webhook ./cmd/server
 
-# Runtime stage
-FROM alpine:latest
-
-RUN apk --no-cache add ca-certificates
+# Runtime stage: static binary, CA certificates included, no shell
+FROM gcr.io/distroless/static-debian13:nonroot
 
 WORKDIR /app
 
 # Copy the binary from builder
 COPY --from=builder --chmod=0755 /app/external-dns-simply-webhook /app/external-dns-simply-webhook
-
-# Use non-root user
-USER 65534:65534
 
 # Expose the default port
 EXPOSE 8888

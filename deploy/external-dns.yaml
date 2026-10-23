@@ -1,4 +1,9 @@
 apiVersion: v1
+kind: Namespace
+metadata:
+  name: external-dns
+---
+apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: external-dns
@@ -57,9 +62,55 @@ spec:
       labels:
         app: external-dns
     spec:
+      serviceAccountName: external-dns
       containers:
+      - name: simply-webhook
+        image: ghcr.io/uozalp/external-dns-simply-webhook:0.3.0
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+        env:
+        - name: SIMPLY_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: simply-credentials
+              key: api-key
+        - name: LOG_LEVEL
+          value: "info"
+        - name: DOMAIN_FILTER
+          value: "example.com"  # Optional: filter to specific domains
+        ports:
+        - containerPort: 8888
+          name: http
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
       - name: external-dns
-        image: registry.k8s.io/external-dns/external-dns:latest
+        image: registry.k8s.io/external-dns/external-dns:v0.24.0
         imagePullPolicy: IfNotPresent
         securityContext:
           allowPrivilegeEscalation: false
@@ -74,10 +125,16 @@ spec:
         args:
         - --source=service
         - --source=ingress
+        # - --source=crd  # for MX/SRV via DNSEndpoint; needs the DNSEndpoint CRD installed first
         - --domain-filter=example.com  # Optional: filter to specific domains
         - --provider=webhook
-        - --webhook-provider-url=http://external-dns-simply-webhook.external-dns.svc.cluster.local:8888
+        - --webhook-provider-url=http://localhost:8888
         - --policy=upsert-only  # or 'sync' to enable deletion
+        - --managed-record-types=A
+        - --managed-record-types=AAAA
+        - --managed-record-types=CNAME
+        - --managed-record-types=MX
+        - --managed-record-types=SRV
         - --registry=txt
         - --txt-owner-id=my-cluster-id
         - --interval=1m
