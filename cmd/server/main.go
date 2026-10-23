@@ -52,12 +52,6 @@ func main() {
 	}))
 
 	// Get configuration from environment
-	accountName := os.Getenv("SIMPLY_ACCOUNT_NAME")
-	if accountName == "" {
-		logger.Error("SIMPLY_ACCOUNT_NAME environment variable is required")
-		os.Exit(1)
-	}
-
 	apiKey := os.Getenv("SIMPLY_API_KEY")
 	if apiKey == "" {
 		logger.Error("SIMPLY_API_KEY environment variable is required")
@@ -70,7 +64,7 @@ func main() {
 	}
 
 	// Create Simply.com client
-	client := simply.NewClient(accountName, apiKey)
+	client := simply.NewClient(apiKey)
 
 	// Fetch all domains managed by Simply.com
 	logger.Info("Fetching domains from Simply.com.")
@@ -83,20 +77,23 @@ func main() {
 
 	// Get domain filter from environment (optional)
 	domainFilter := os.Getenv("DOMAIN_FILTER")
-	var finalDomains []string
+	var finalDomains []simply.Domain
 
 	if domainFilter != "" {
 		// User specified domain filter - validate against Simply.com domains
 		requestedDomains := strings.Split(domainFilter, ",")
-		simplyDomainsMap := make(map[string]bool)
+		simplyDomainsMap := make(map[string]simply.Domain)
 		for _, domain := range allSimplyDomains {
-			simplyDomainsMap[domain] = true
+			if _, exists := simplyDomainsMap[domain.Name]; !exists {
+				simplyDomainsMap[domain.Name] = domain
+			}
+			simplyDomainsMap[strings.ToLower(domain.Object)] = domain
 		}
 
 		for _, domain := range requestedDomains {
 			domain = strings.TrimSpace(domain)
-			if simplyDomainsMap[domain] {
-				finalDomains = append(finalDomains, domain)
+			if simplyDomain, ok := simplyDomainsMap[strings.ToLower(domain)]; ok {
+				finalDomains = append(finalDomains, simplyDomain)
 				logger.Info("Domain filter: domain is managed by Simply.com", "domain", domain)
 			} else {
 				logger.Error("Domain filter: domain is NOT managed by Simply.com - skipping", "domain", domain)

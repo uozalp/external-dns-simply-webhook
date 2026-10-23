@@ -21,14 +21,20 @@ const (
 type Handler struct {
 	Client       *simply.Client
 	Logger       *slog.Logger
+	Domains      []simply.Domain
 	DomainFilter []string
 }
 
 // NewHandler creates a new webhook handler
-func NewHandler(client *simply.Client, logger *slog.Logger, domainFilter []string) *Handler {
+func NewHandler(client *simply.Client, logger *slog.Logger, domains []simply.Domain) *Handler {
+	domainFilter := make([]string, 0, len(domains))
+	for _, domain := range domains {
+		domainFilter = append(domainFilter, domain.Name)
+	}
 	return &Handler{
 		Client:       client,
 		Logger:       logger,
+		Domains:      domains,
 		DomainFilter: domainFilter,
 	}
 }
@@ -65,30 +71,22 @@ func (h *Handler) GetRecords(w http.ResponseWriter, r *http.Request) {
 	var response []endpointResponse
 
 	// Get records for each configured domain
-	for _, domain := range h.DomainFilter {
+	for _, domain := range h.Domains {
 
-		records, err := h.Client.ListRecords(domain)
+		records, err := h.Client.ListRecords(domain.Object)
 		if err != nil {
-			h.Logger.Error("Failed to list records for domain", "domain", domain, "error", err)
+			h.Logger.Error("Failed to list records for domain", "domain", domain.Name, "error", err)
 			continue
 		}
 
-		h.Logger.Debug("Found records for domain", "count", len(records), "domain", domain)
+		h.Logger.Debug("Found records for domain", "count", len(records), "domain", domain.Name)
 
 		// Convert Simply records to External-DNS endpoints
 		for _, record := range records {
 			h.Logger.Debug("Processing record", "id", record.ID, "type", record.Type, "name", record.Name, "data", record.Data)
 
-			// Build full DNS name
-			var dnsName string
-			if record.Name == "@" || record.Name == "" {
-				dnsName = domain
-			} else {
-				dnsName = record.Name + "." + domain
-			}
-
 			ep := endpointResponse{
-				DNSName:    dnsName,
+				DNSName:    recordDNSName(record, domain),
 				RecordType: record.Type,
 				Targets:    []string{record.Data},
 				RecordTTL:  record.TTL,
@@ -137,28 +135,20 @@ func (h *Handler) ApplyChanges(w http.ResponseWriter, r *http.Request) {
 	h.Logger.Debug("Full request payload", slog.Any("changes", changes))
 
 	// Fetch all records from all domains and build a lookup map
-	// Key: dnsName:recordType, Value: simply.Record
+	// Key: object:dnsName:recordType, Value: simply.Record
 	recordMap := make(map[string]simply.Record)
 
-	for _, domain := range h.DomainFilter {
-		records, err := h.Client.ListRecords(domain)
+	for _, domain := range h.Domains {
+		records, err := h.Client.ListRecords(domain.Object)
 		if err != nil {
-			h.Logger.Error("Failed to list records for domain", "domain", domain, "error", err)
+			h.Logger.Error("Failed to list records for domain", "domain", domain.Name, "error", err)
 			http.Error(w, fmt.Sprintf("Failed to list records: %v", err), http.StatusInternalServerError)
 			return
 		}
 
 		for _, record := range records {
-			// Build full DNS name
-			var dnsName string
-			if record.Name == "@" || record.Name == "" {
-				dnsName = domain
-			} else {
-				dnsName = record.Name + "." + domain
-			}
-
-			// Create lookup key: dnsName:recordType
-			key := fmt.Sprintf("%s:%s", dnsName, record.Type)
+			// Create lookup key: object:dnsName:recordType
+			key := recordKey(domain.Object, recordDNSName(record, domain), record.Type)
 			recordMap[key] = record
 		}
 	}
@@ -198,7 +188,13 @@ func (h *Handler) ApplyChanges(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Lookup record ID from map
-		key := fmt.Sprintf("%s:%s", newEp.DNSName, newEp.RecordType)
+		object, err := h.extractDomain(newEp.DNSName)
+		if err != nil {
+			h.Logger.Error("Failed to find domain for update", "dnsName", newEp.DNSName, "error", err)
+			http.Error(w, fmt.Sprintf("Failed to update record: %v", err), http.StatusInternalServerError)
+			return
+		}
+		key := recordKey(object, newEp.DNSName, newEp.RecordType)
 		existingRecord, found := recordMap[key]
 		if !found {
 			h.Logger.Error("Record not found in map for update", "key", key)
@@ -215,7 +211,12 @@ func (h *Handler) ApplyChanges(w http.ResponseWriter, r *http.Request) {
 
 	// Process deletes - lookup record ID from map
 	for _, ep := range changes.Delete {
-		key := fmt.Sprintf("%s:%s", ep.DNSName, ep.RecordType)
+		object, err := h.extractDomain(ep.DNSName)
+		if err != nil {
+			h.Logger.Warn("No domain found for deletion, skipping", "dnsName", ep.DNSName, "error", err)
+			continue
+		}
+		key := recordKey(object, ep.DNSName, ep.RecordType)
 		existingRecord, found := recordMap[key]
 		if !found {
 			h.Logger.Warn("Record not found in map for deletion, skipping", "key", key)
@@ -361,11 +362,43 @@ func (h *Handler) deleteEndpoint(ep *endpoint.Endpoint, recordID int) error {
 	return nil
 }
 
-// extractDomain extracts the base domain from a DNS name
+// extractDomain returns the product object for the configured domain that
+// holds dnsName. The longest match wins, so a subdomain product such as
+// www.example.com is preferred over example.com.
 func (h *Handler) extractDomain(dnsName string) (string, error) {
-	parts := strings.Split(dnsName, ".")
-	if len(parts) < 2 {
-		return "", fmt.Errorf("invalid DNS name: %s", dnsName)
+	objects := make(map[string]string, len(h.Domains)*2)
+	for _, domain := range h.Domains {
+		objects[strings.ToLower(domain.Object)] = domain.Object
 	}
-	return strings.Join(parts[len(parts)-2:], "."), nil
+	for _, domain := range h.Domains {
+		if _, exists := objects[domain.Name]; !exists {
+			objects[domain.Name] = domain.Object
+		}
+	}
+
+	name := strings.ToLower(strings.TrimSuffix(dnsName, "."))
+	for candidate := name; candidate != ""; {
+		if object, ok := objects[candidate]; ok {
+			return object, nil
+		}
+		dot := strings.IndexByte(candidate, '.')
+		if dot < 0 {
+			break
+		}
+		candidate = candidate[dot+1:]
+	}
+	return "", fmt.Errorf("no managed Simply.com domain found for %s", dnsName)
+}
+
+// recordKey identifies a record by product object, DNS name and type
+func recordKey(object, dnsName, recordType string) string {
+	return fmt.Sprintf("%s:%s:%s", object, strings.ToLower(strings.TrimSuffix(dnsName, ".")), recordType)
+}
+
+// recordDNSName builds the full punycode DNS name of a record in domain
+func recordDNSName(record simply.Record, domain simply.Domain) string {
+	if record.Name == "@" || record.Name == "" {
+		return domain.Name
+	}
+	return record.Name + "." + domain.Name
 }
