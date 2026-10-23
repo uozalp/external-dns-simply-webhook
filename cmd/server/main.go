@@ -1,52 +1,81 @@
 package main
 
 import (
-	"fmt"
+	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
-	"github.com/gorilla/mux"
 	"github.com/uozalp/external-dns-simply-webhook/pkg/simply"
 	"github.com/uozalp/external-dns-simply-webhook/pkg/webhook"
 )
 
-// corsMiddleware adds CORS headers to all responses
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept")
-		w.Header().Set("Access-Control-Max-Age", "3600")
+const (
+	domainRefreshInterval = 5 * time.Minute
+	shutdownTimeout       = 30 * time.Second
+)
 
-		// Handle preflight requests
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusNoContent)
+// resolveDomains lists the Simply.com domains and narrows them to the comma-separated
+// filter. An empty filter keeps every domain; a filter that matches none is an error.
+func resolveDomains(client *simply.Client, logger *slog.Logger, filter string) ([]simply.Domain, error) {
+	all, err := client.ListDomains()
+	if err != nil {
+		return nil, err
+	}
+	if filter == "" {
+		return all, nil
+	}
+
+	found, unknown := simply.FilterDomains(all, strings.Split(filter, ","))
+	for _, domain := range unknown {
+		logger.Error("Domain filter: domain is NOT managed by Simply.com - skipping", "domain", domain)
+	}
+	if len(found) == 0 {
+		return nil, errors.New("no valid domains found in DOMAIN_FILTER")
+	}
+	return found, nil
+}
+
+// refreshDomains keeps the handler's domains in step with the account, so a domain that
+// is added or removed at Simply.com does not need a restart. A failed refresh keeps the old list.
+func refreshDomains(ctx context.Context, client *simply.Client, logger *slog.Logger, handler *webhook.Handler, filter string) {
+	ticker := time.NewTicker(domainRefreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
 			return
+		case <-ticker.C:
+			domains, err := resolveDomains(client, logger, filter)
+			if err != nil {
+				logger.Warn("Failed to refresh domains, keeping the current list", "error", err)
+				continue
+			}
+			handler.SetDomains(domains)
 		}
+	}
+}
 
-		next.ServeHTTP(w, r)
-	})
+func newRouter(handler *webhook.Handler) *http.ServeMux {
+	router := http.NewServeMux()
+	router.HandleFunc("GET /{$}", handler.Negotiate)
+	router.HandleFunc("GET /healthz", handler.Healthz)
+	router.HandleFunc("GET /records", handler.GetRecords)
+	router.HandleFunc("POST /records", handler.ApplyChanges)
+	router.HandleFunc("POST /adjustendpoints", handler.AdjustEndpoints)
+	return router
 }
 
 func main() {
 	// Configure logger
-	logLevel := os.Getenv("LOG_LEVEL")
+	// An empty or unknown LOG_LEVEL leaves the level at info.
 	var level slog.Level
-	switch strings.ToLower(logLevel) {
-	case "debug":
-		level = slog.LevelDebug
-	case "info", "":
-		level = slog.LevelInfo
-	case "warn", "warning":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	default:
-		level = slog.LevelInfo
-	}
-
+	_ = level.UnmarshalText([]byte(os.Getenv("LOG_LEVEL")))
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: level,
 	}))
@@ -66,73 +95,49 @@ func main() {
 	// Create Simply.com client
 	client := simply.NewClient(apiKey)
 
-	// Fetch all domains managed by Simply.com
+	domainFilter := os.Getenv("DOMAIN_FILTER")
 	logger.Info("Fetching domains from Simply.com.")
-	allSimplyDomains, err := client.ListDomains()
+	finalDomains, err := resolveDomains(client, logger, domainFilter)
 	if err != nil {
-		logger.Error("Failed to fetch domains from Simply.com", "error", err)
+		logger.Error("Failed to resolve domains", "error", err)
 		os.Exit(1)
 	}
-	logger.Info("Found domains in Simply.com", "count", len(allSimplyDomains), "domains", allSimplyDomains)
-
-	// Get domain filter from environment (optional)
-	domainFilter := os.Getenv("DOMAIN_FILTER")
-	var finalDomains []simply.Domain
-
-	if domainFilter != "" {
-		// User specified domain filter - validate against Simply.com domains
-		requestedDomains := strings.Split(domainFilter, ",")
-		simplyDomainsMap := make(map[string]simply.Domain)
-		for _, domain := range allSimplyDomains {
-			if _, exists := simplyDomainsMap[domain.Name]; !exists {
-				simplyDomainsMap[domain.Name] = domain
-			}
-			simplyDomainsMap[strings.ToLower(domain.Object)] = domain
-		}
-
-		for _, domain := range requestedDomains {
-			domain = strings.TrimSpace(domain)
-			if simplyDomain, ok := simplyDomainsMap[strings.ToLower(domain)]; ok {
-				finalDomains = append(finalDomains, simplyDomain)
-				logger.Info("Domain filter: domain is managed by Simply.com", "domain", domain)
-			} else {
-				logger.Error("Domain filter: domain is NOT managed by Simply.com - skipping", "domain", domain)
-			}
-		}
-
-		if len(finalDomains) == 0 {
-			logger.Error("No valid domains found in DOMAIN_FILTER")
-			os.Exit(1)
-		}
-		logger.Info("Managing filtered domains", "count", len(finalDomains), "domains", finalDomains)
-	} else {
-		// No domain filter - manage all Simply.com domains
-		finalDomains = allSimplyDomains
-		logger.Info("No domain filter set, managing all Simply.com domains", "count", len(finalDomains))
-	}
+	logger.Info("Managing domains", "count", len(finalDomains), "domains", finalDomains)
 
 	// Create webhook handler with validated domains
 	handler := webhook.NewHandler(client, logger, finalDomains)
 
-	// Setup router
-	router := mux.NewRouter()
-	router.HandleFunc("/", handler.Negotiate).Methods("GET")
-	router.HandleFunc("/healthz", handler.Healthz).Methods("GET")
-	router.HandleFunc("/records", handler.GetRecords).Methods("GET")
-	router.HandleFunc("/records", handler.ApplyChanges).Methods("POST")
-	router.HandleFunc("/records", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	}).Methods("OPTIONS")
-	router.HandleFunc("/adjustendpoints", handler.AdjustEndpoints).Methods("POST")
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	go refreshDomains(ctx, client, logger, handler, domainFilter)
 
-	// Apply CORS middleware to all routes
-	router.Use(corsMiddleware)
+	// Setup router
+	router := newRouter(handler)
 
 	// Start server
-	addr := fmt.Sprintf(":%s", port)
+	addr := ":" + port
 	logger.Info("Starting server", "addr", addr)
-	if err := http.ListenAndServe(addr, router); err != nil {
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           router,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			logger.Error("Failed to shut down server", "error", err)
+		}
+	}()
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("Failed to start server", "error", err)
 		os.Exit(1)
 	}
+	// ListenAndServe returns as soon as Shutdown starts; wait until in-flight requests finish.
+	<-shutdownDone
 }

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/uozalp/external-dns-simply-webhook/pkg/simply"
@@ -15,22 +16,25 @@ import (
 func newTestHandler(t *testing.T, requests *[]string) *Handler {
 	t.Helper()
 
+	var mu sync.Mutex
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
 		*requests = append(*requests, r.Method+" "+r.URL.Path+" "+strings.TrimSpace(string(body)))
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/my/products/kvolbæk.dk/dns/records/":
-			json.NewEncoder(w).Encode(map[string]any{"records": []map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{"records": []map[string]any{
 				{"record_id": 1, "name": "@", "type": "A", "data": "192.0.2.1", "ttl": 3600},
 				{"record_id": 2, "name": "www", "type": "A", "data": "192.0.2.2", "ttl": 3600},
 			}})
 		case "/my/products/www.example.com/dns/records/":
-			json.NewEncoder(w).Encode(map[string]any{"records": []map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{"records": []map[string]any{
 				{"record_id": 3, "name": "app", "type": "A", "data": "192.0.2.3", "ttl": 3600},
 			}})
 		default:
-			json.NewEncoder(w).Encode(map[string]any{"records": []any{}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"records": []any{}})
 		}
 	}))
 	t.Cleanup(server.Close)
@@ -111,12 +115,12 @@ func TestExtractDomainUnknown(t *testing.T) {
 	var requests []string
 	handler := newTestHandler(t, &requests)
 
-	if _, err := handler.extractDomain("www.unknown.dk"); err == nil {
+	if _, err := handler.findDomain("www.unknown.dk"); err == nil {
 		t.Error("expected error for a name outside the managed domains")
 	}
-	object, err := handler.extractDomain("WWW.KVOLBÆK.DK.")
-	if err != nil || object != "kvolbæk.dk" {
-		t.Errorf("extractDomain = %q, %v", object, err)
+	domain, err := handler.findDomain("WWW.KVOLBÆK.DK.")
+	if err != nil || domain.Object != "kvolbæk.dk" {
+		t.Errorf("findDomain = %v, %v", domain, err)
 	}
 }
 
@@ -128,15 +132,15 @@ func TestApplyChangesKeepsRecordIDsPerProduct(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/my/products/example.com/dns/records/":
-			json.NewEncoder(w).Encode(map[string]any{"records": []map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{"records": []map[string]any{
 				{"record_id": 10, "name": "www", "type": "A", "data": "192.0.2.10", "ttl": 3600},
 			}})
 		case "/my/products/www.example.com/dns/records/":
-			json.NewEncoder(w).Encode(map[string]any{"records": []map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{"records": []map[string]any{
 				{"record_id": 20, "name": "@", "type": "A", "data": "192.0.2.20", "ttl": 3600},
 			}})
 		default:
-			json.NewEncoder(w).Encode(map[string]any{"records": []any{}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"records": []any{}})
 		}
 	}))
 	defer server.Close()
@@ -151,7 +155,7 @@ func TestApplyChangesKeepsRecordIDsPerProduct(t *testing.T) {
 	changes := `{
 		"updateOld": [{"dnsName": "www.example.com", "recordType": "A", "targets": ["192.0.2.20"]}],
 		"updateNew": [{"dnsName": "www.example.com", "recordType": "A", "targets": ["192.0.2.21"]}],
-		"delete": [{"dnsName": "www.example.com", "recordType": "A", "targets": ["192.0.2.21"]}]
+		"delete": [{"dnsName": "www.example.com", "recordType": "A", "targets": ["192.0.2.20"]}]
 	}`
 	recorder := httptest.NewRecorder()
 	handler.ApplyChanges(recorder, httptest.NewRequest(http.MethodPost, "/records", strings.NewReader(changes)))

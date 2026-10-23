@@ -15,14 +15,16 @@ spec:
       labels:
         {{- include "external-dns-simply.selectorLabels" . | nindent 8 }}
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: webhook
-          image: "{{ .Values.webhook.image.repository }}:{{ .Values.webhook.image.tag }}"
+          image: "{{ .Values.webhook.image.repository }}:{{ .Values.webhook.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.webhook.image.pullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             runAsNonRoot: true
-            runAsUser: 65534
+            runAsUser: 65532
             capabilities:
               drop:
                 - ALL
@@ -38,6 +40,8 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.simply.existingSecret }}
                   key: {{ .Values.simply.apiKeyKey }}
+            - name: PORT
+              value: {{ .Values.webhook.port | quote }}
             - name: LOG_LEVEL
               value: {{ .Values.webhook.logLevel | quote }}
             {{- if .Values.domainFilter }}

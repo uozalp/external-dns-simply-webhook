@@ -2,7 +2,8 @@
 webhook:
   image:
     repository: ghcr.io/uozalp/external-dns-simply-webhook
-    tag: "0.1.0"
+    # Empty means the chart's appVersion.
+    tag: ""
     pullPolicy: IfNotPresent
   port: 8888
   resources:

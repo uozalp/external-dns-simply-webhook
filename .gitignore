@@ -37,3 +37,5 @@ debug/*
 *.local
 *.tgz
 /dist/
+# Local tool binaries
+/bin/
