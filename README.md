@@ -11,17 +11,17 @@ This webhook adapter allows ExternalDNS to manage DNS records in Simply.com via 
 ## Features
 
 - Full support for ExternalDNS webhook interface
-- Manages A, AAAA, CNAME, TXT, MX, SRV and other DNS record types (MX targets are written as `<priority> <mail server>`, SRV targets as `<priority> <weight> <port> <target>.` with a trailing dot)
+- Manages A, AAAA, CNAME, TXT, MX and SRV records (MX targets are written as `<priority> <mail server>`, SRV targets as `<priority> <weight> <port> <target>.` with a trailing dot). See [Supported record types](#supported-record-types)
 - Handles record creation, updates, and deletions
-- Supports TTL management (records without a TTL get 3600 seconds)
-- Domain filtering support; the webhook refreshes its domain list from Simply.com every 5 minutes. ExternalDNS reads the domain filter only once at startup, so restart ExternalDNS after you add or remove a domain
+- Supports TTL management (see [TTL behavior](#ttl-behavior))
+- Domain filtering support; the webhook refreshes its own domain list from Simply.com every 5 minutes. This does not change the filter ExternalDNS read at startup, so restart ExternalDNS after you add or remove a domain
 - Works with IDN domains and with subdomain products (such as `www.example.com` as its own product at Simply.com)
-- Retries reads and deletes on Simply.com rate limits (`429`, honouring `Retry-After`), `5xx` answers and network errors
+- Retries reads, updates and deletes on Simply.com rate limits (`429`, honouring `Retry-After`), `5xx` answers and network errors; creates are never retried (see [API retries](#api-retries))
 - Kubernetes-native deployment, runs as non-root with a read-only root filesystem
 
 ## Prerequisites
 
-- Kubernetes cluster (1.19+)
+- Kubernetes cluster. The manifests and chart use only stable APIs and set no minimum version (no `kubeVersion` in the chart); 1.19 is the oldest version they are written for, and CI does not test against a cluster. The practical floor is whatever your ExternalDNS release supports
 - ExternalDNS (v0.14.0+, the first release with webhook providers)
 - Simply.com account with API access
 - Simply.com API key
@@ -37,6 +37,17 @@ This webhook adapter allows ExternalDNS to manage DNS records in Simply.com via 
 The API key alone identifies the account. An account name is not needed: `SIMPLY_ACCOUNT_NAME` and an `account-name` secret key from older versions are ignored and can be removed.
 
 ### 2. Deploy the Webhook
+
+> **Warning: start with `--policy=upsert-only`.** With `--policy=sync` ExternalDNS also *deletes* records, and a wrong domain filter or TXT owner ID can remove records you care about. The webhook does not check ownership itself; it deletes whatever ExternalDNS asks for. Switch to `sync` only after you have:
+>
+> 1. run with `upsert-only` for a few intervals and confirmed that the TXT ownership records (`--registry=txt`) appear next to the records ExternalDNS created,
+> 2. set `--domain-filter` in ExternalDNS (and `DOMAIN_FILTER` on the webhook) to exactly the domains you want managed,
+> 3. checked that `--txt-owner-id` is unique per cluster, and
+> 4. done a `--dry-run` pass (see below) and read the planned changes.
+>
+> **Audit mode.** The webhook has no dry-run switch of its own. Run ExternalDNS with `--dry-run`: it computes and logs the changes but never calls `POST /records`, so nothing is written to Simply.com.
+>
+> **Recovery.** The webhook keeps no backup. Before enabling `sync`, save a copy of each zone, for example from the Simply.com control panel or with `GET https://api.simply.com/2/my/products/<domain>/dns/records/`. If records were deleted by mistake: set the policy back to `upsert-only`, fix the filter or owner ID, then let ExternalDNS re-create records that still have a source (it does so on the next `--interval`). Records that came from outside Kubernetes, such as hand-made MX or TXT records, must be restored from your saved copy. Records the webhook creates carry the comment `Managed by External-DNS`, which helps you tell them apart in the control panel.
 
 The webhook runs as a sidecar container in the ExternalDNS pod, either with the manifest in this repo or with the official ExternalDNS chart. ExternalDNS then reaches it on `localhost`, and with no Service nothing outside the pod is routed to it. The bundled Helm chart is the exception: it runs the webhook as a standalone Deployment with its own Service.
 
@@ -68,7 +79,7 @@ kubectl -n external-dns logs deploy/external-dns -c simply-webhook   # should li
 
 #### Using Helm (standalone webhook)
 
-This chart deploys the webhook as its own Deployment and Service, not as a sidecar. Use it only if you want to run ExternalDNS separately.
+This chart deploys only the webhook (a Deployment and a Service). It does **not** install ExternalDNS; you install and configure that separately. Use it only if you want to run ExternalDNS separately.
 
 ```bash
 kubectl create namespace external-dns
@@ -85,7 +96,7 @@ helm install external-dns-simply \
 
 | Value | Description | Default |
 |-------|-------------|---------|
-| `domainFilter` | Comma-separated domains to manage | all domains |
+| `domainFilter` | Comma-separated domains the webhook manages (sets `DOMAIN_FILTER`; it does not configure ExternalDNS) | all domains |
 | `simply.existingSecret` | Secret that holds the API key | `simply-credentials` |
 | `simply.apiKeyKey` | Key inside that secret | `api-key` |
 | `webhook.image.tag` | Image tag | chart `appVersion` |
@@ -94,7 +105,7 @@ helm install external-dns-simply \
 
 Then install ExternalDNS separately and point it to the webhook with
 `--webhook-provider-url=http://external-dns-simply.external-dns.svc.cluster.local:8888`.
-Run a single replica of the webhook: it serializes writes inside one process only.
+Set a compatible `--domain-filter` on ExternalDNS too, as `domainFilter` only affects the webhook. The chart listens on `8888`, so the URL above uses that port. Run a single replica of the webhook: it serializes writes inside one process only.
 
 #### Using the official ExternalDNS Helm chart (sidecar)
 
@@ -113,11 +124,14 @@ provider:
           name: simply-credentials
           key: api-key
     - name: PORT
-      value: "8080"  # the chart's probes expect port 8080
+      value: "8080"  # the chart's probes expect port 8080 (the webhook itself defaults to 8888)
     - name: DOMAIN_FILTER
       value: example.com
 domainFilters:
 - example.com
+policy: upsert-only   # use 'sync' only after reading the warning above
+registry: txt
+txtOwnerId: my-cluster-id   # unique per cluster
 sources:
 - service
 - ingress
@@ -146,9 +160,9 @@ The webhook is configured via environment variables in the deployment:
 | `SIMPLY_API_KEY` | Simply.com API key | Yes (the webhook exits without it) | - |
 | `DOMAIN_FILTER` | Comma-separated list of domains to manage. Unicode or punycode names both work. | No | All domains |
 | `LOG_LEVEL` | Logging level (debug, info, warn, error) | No | `info` |
-| `PORT` | HTTP server port | No | `8888` |
+| `PORT` | HTTP server port. The kubectl manifest and the standalone chart use `8888`; the official ExternalDNS chart's webhook probes expect `8080`, so set `PORT=8080` there and match `--webhook-provider-url` | No | `8888` |
 
-At startup the webhook lists your Simply.com domains. Names in `DOMAIN_FILTER` that Simply.com does not manage are logged as errors and skipped. If none match, the webhook exits. Logs are JSON on stdout.
+At startup the webhook lists your Simply.com domains. `DOMAIN_FILTER` limits what the webhook reads and writes, while ExternalDNS's `--domain-filter` limits what ExternalDNS plans; set both, to compatible values. Names in `DOMAIN_FILTER` that Simply.com does not manage are logged as errors and skipped. If none match, the webhook exits. Logs are JSON on stdout.
 
 ExternalDNS configuration (the `external-dns` container args):
 
@@ -160,7 +174,7 @@ args:
   - --domain-filter=example.com   # Only manage this domain
   - --provider=webhook
   - --webhook-provider-url=http://localhost:8888
-  - --policy=upsert-only          # Don't delete records (or use 'sync')
+  - --policy=upsert-only          # Never delete records; use 'sync' only after the checks above
   - --managed-record-types=A      # ExternalDNS only manages A, AAAA and CNAME by default;
   - --managed-record-types=AAAA   # repeat the flag and add MX and SRV to manage those too
   - --managed-record-types=CNAME
@@ -209,6 +223,27 @@ spec:
     - "20 40 5060 sip2.example.com."
 ```
 
+### Supported record types
+
+The webhook creates, updates, reads and deletes **A, AAAA, CNAME, TXT, MX and SRV** records. MX and SRV targets must start with a priority (see above). Other types, such as NS or CAA, are not supported: the webhook neither validates nor transforms them, so whether Simply.com accepts them is untested. It reads every record type in a managed domain, but ExternalDNS only acts on the types in `--managed-record-types` (A, AAAA and CNAME by default).
+
+### TTL behavior
+
+- A create without a TTL (ExternalDNS sends `0`) gets `3600` seconds.
+- An update without a TTL keeps the TTL of the existing record; `3600` applies only if the update has to add a new record.
+- Any other TTL is sent to Simply.com unchanged. The webhook does not check minimum or maximum values, and a negative or out-of-range value is rejected by Simply.com, which fails the request with `500`.
+
+### API retries
+
+| Operation | Simply.com call | Retried |
+|-----------|-----------------|---------|
+| List domains and records | `GET` | Yes |
+| Update a record | `PUT` | Yes |
+| Delete a record | `DELETE` | Yes; a `404` on a retry counts as success |
+| Create a record | `POST` | No, so a lost reply cannot create a duplicate |
+
+A call is tried at most 3 times and is retried on `429`, `5xx` answers and network errors or timeouts (30 seconds per attempt). Other `4xx` answers fail at once. The wait starts at 500 ms and doubles, or follows `Retry-After` if that is longer, and is capped at 10 seconds per wait.
+
 ## API Endpoints
 
 The webhook exposes the following endpoints:
@@ -226,7 +261,7 @@ The ExternalDNS endpoints answer with `Content-Type: application/external.dns.we
 ## How it works
 
 - Records are written to Simply.com with the comment `Managed by External-DNS`.
-- A failed write returns `500` to ExternalDNS, which retries on its next `--interval`. Writes (`POST`) are not retried inside the webhook, so a lost reply can never create a record twice.
+- A failed write returns `500` to ExternalDNS, which retries on its next `--interval`. Record creation (`POST`) is not retried inside the webhook, so a lost reply can never create a record twice. Updates and deletes are idempotent and are retried (see [API retries](#api-retries)).
 - If listing records fails for any domain, `GET /records` fails as a whole. A partial list would make ExternalDNS re-create the missing records.
 - Changes are applied one request at a time, so two requests cannot both create the same record.
 - Records of a domain in Simply.com that is not `managed` (DNS hosted elsewhere) are not touched.
@@ -242,7 +277,7 @@ The ExternalDNS endpoints answer with `Content-Type: application/external.dns.we
 | ExternalDNS ignores a new domain | ExternalDNS reads the domain filter once at startup. Restart it. |
 | MX or SRV records are never created | Add `--source=crd` and the matching `--managed-record-types` flags. See [MX and SRV records](#mx-and-srv-records). |
 | `must start with a priority` | An MX or SRV target is missing the leading number. Use `10 mail.example.com`. |
-| `429` in the logs | Simply.com rate limit. The webhook backs off and retries reads, updates and deletes. If it persists, raise ExternalDNS `--interval`. |
+| `429` in the logs | Simply.com rate limit. The webhook backs off and retries reads, updates and deletes (not creates). If it persists, raise ExternalDNS `--interval`. |
 
 ## Development
 
